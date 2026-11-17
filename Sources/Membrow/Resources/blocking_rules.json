@@ -1,0 +1,278 @@
+[
+  {
+    "trigger": {
+      "url-filter": ".*",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"],
+      "if-domain": [
+        "*doubleclick.net",
+        "*googlesyndication.com",
+        "*googleadservices.com",
+        "*googletagmanager.com",
+        "*google-analytics.com",
+        "*adservice.google.com",
+        "*adnxs.com",
+        "*adsrvr.org",
+        "*amazon-adsystem.com",
+        "*casalemedia.com",
+        "*criteo.com",
+        "*criteo.net",
+        "*facebook.net",
+        "*hotjar.com",
+        "*moatads.com",
+        "*openx.net",
+        "*outbrain.com",
+        "*pubmatic.com",
+        "*quantserve.com",
+        "*rubiconproject.com",
+        "*scorecardresearch.com",
+        "*taboola.com",
+        "*zedo.com",
+        "*clarity.ms",
+        "*bat.bing.com",
+        "*ads.linkedin.com",
+        "*px.ads.linkedin.com",
+        "*analytics.tiktok.com",
+        "*ads-twitter.com",
+        "*static.ads-twitter.com",
+        "*segment.io",
+        "*segment.com",
+        "*mixpanel.com",
+        "*amplitude.com",
+        "*fullstory.com",
+        "*mouseflow.com",
+        "*newrelic.com",
+        "*nr-data.net",
+        "*sentry-cdn.com",
+        "*bugsnag.com",
+        "*chartbeat.com",
+        "*parsely.com",
+        "*heapanalytics.com"
+      ]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/pagead/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/adserver/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/adservices/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/ads/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/analytics/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/telemetry/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/tracking/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/beacon/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/collect/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/gtag/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/tagmanager/",
+      "resource-type": ["image", "script", "raw", "popup", "svg-document"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/adsbygoogle",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/gtag/js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/analytics\\.js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/ga\\.js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/gtm\\.js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/fbevents\\.js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/hotjar-[^/]*\\.js",
+      "resource-type": ["script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*utm_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*utm_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*ad_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*ad_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*ads_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*ads_",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*tracking",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*tracking",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*beacon",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*beacon",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*collect",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*collect",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.gif\\?.*pixel",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[^/]+/[^/]*\\.png\\?.*pixel",
+      "resource-type": ["image", "raw"]
+    },
+    "action": { "type": "block" }
+  }
+]
