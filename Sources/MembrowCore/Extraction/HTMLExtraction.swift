@@ -129,6 +129,9 @@ public enum HTMLParser {
 
     private static let rawTextElements: Set<String> = ["script", "style", "textarea", "title"]
 
+    /// 解析/序列化/析构都是递归的：给不可信页面的嵌套深度设上限，避免栈溢出崩溃。
+    public static let maxDepth = 512
+
     private static let blockElements: Set<String> = [
         "address", "article", "aside", "blockquote", "div", "dl", "fieldset", "figcaption",
         "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
@@ -325,7 +328,7 @@ public enum HTMLParser {
 
             let element = HTMLNode(element: tag, attributes: attributes)
             current().append(element)
-            if !selfClosing && !voidElements.contains(tag) {
+            if !selfClosing && !voidElements.contains(tag) && stack.count < maxDepth {
                 stack.append(element)
             }
         }
@@ -373,8 +376,9 @@ public enum HTMLParser {
                 index = input.index(after: index)
                 continue
             }
-            guard let semicolon = input[index...].firstIndex(of: ";"),
-                  input.distance(from: index, to: semicolon) <= 12 else {
+            // 只在 12 个字符内找分号：不能先全串搜索，否则大量裸 `&` 会退化成 O(n²)。
+            let windowEnd = input.index(index, offsetBy: 13, limitedBy: input.endIndex) ?? input.endIndex
+            guard let semicolon = input[index..<windowEnd].firstIndex(of: ";") else {
                 result.append("&")
                 index = input.index(after: index)
                 continue
@@ -460,7 +464,8 @@ public struct CSSSelector {
                 index = selector.index(after: index)
             case " ", "\t", "\n":
                 flushStep()
-                if !current.isEmpty {
+                // 只有“还没有待定组合器”时才算后代组合器：否则 `div > p` 里的空格会把 `>` 覆盖成空格。
+                if !current.isEmpty, pendingCombinator == nil {
                     pendingCombinator = " "
                 }
                 index = selector.index(after: index)

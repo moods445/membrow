@@ -15,6 +15,8 @@ final class WebInstance {
     var lastError: String?
     var currentURL: URL?
     var blockingEnabled: Bool
+    /// 强制深色样式表实例；私有接口不可用时为 nil。
+    var forcedDarkStyleSheet: NSObject?
 
     init(bookmarkID: UUID,
          webView: WKWebView,
@@ -40,10 +42,15 @@ final class WebViewHandler: NSObject, WKNavigationDelegate, WKUIDelegate, WKScri
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
+        // 只接受主框架、且 host 与真实安全来源一致的提交：
+        // WKScriptMessageHandler 对同进程所有 frame 可见，不校验就能被第三方 iframe 伪造成任意站点凭据。
         guard message.name == CredentialScript.handlerName,
+              message.frameInfo.isMainFrame,
               let body = message.body as? [String: Any],
               let host = body["host"] as? String,
-              let password = body["password"] as? String else { return }
+              let password = body["password"] as? String,
+              SiteMatcher.normalizedHost(message.frameInfo.securityOrigin.host) == SiteMatcher.normalizedHost(host)
+        else { return }
         let username = body["username"] as? String ?? ""
         runtime?.handleCredentialCapture(bookmarkID: bookmarkID,
                                          host: host,

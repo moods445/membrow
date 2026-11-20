@@ -23,13 +23,20 @@ final class SnapshotRegistry {
                   webView: WKWebView,
                   isVisible: @escaping () -> Bool,
                   onEvict: @escaping () -> Void) {
+        // 每次 render 都会重注册：同一个 WebView 必须沿用原 lastVisibleAt，
+        // 否则隐藏的快照会被刷成“刚刚可见”，LRU 失效。
+        let previous = entries[bookmarkID]
+        let lastVisibleAt = previous?.webView === webView ? previous?.lastVisibleAt : nil
         entries[bookmarkID] = Entry(webView: webView,
                                     isVisible: isVisible,
                                     onEvict: onEvict,
-                                    lastVisibleAt: Date())
+                                    lastVisibleAt: lastVisibleAt ?? Date())
     }
 
-    func unregister(bookmarkID: UUID) {
+    /// 只注销仍然登记着的那个 WebView：同一个收藏可能在两个 pane 各有一个快照。
+    func unregister(bookmarkID: UUID, webView: WKWebView? = nil) {
+        guard let entry = entries[bookmarkID] else { return }
+        if let webView, entry.webView !== webView { return }
         entries[bookmarkID] = nil
     }
 
@@ -44,11 +51,13 @@ final class SnapshotRegistry {
             }
             let visible = entry.isVisible()
             if visible { entries[bookmarkID]?.lastVisibleAt = now }
+            let pid = MemoryProbe.webProcessIdentifier(of: webView)
             samples.append(InstanceMemorySample(bookmarkID: bookmarkID,
-                                                footprint: MemoryProbe.footprint(of: webView),
+                                                footprint: pid.flatMap { MemoryProbe.footprint(of: $0) },
                                                 isVisible: visible,
                                                 isPinned: false,
-                                                lastVisibleAt: entry.lastVisibleAt))
+                                                lastVisibleAt: entry.lastVisibleAt,
+                                                processIdentifier: pid))
         }
         // 视图被销毁但没来得及注销时顺手清理，避免诊断里出现幽灵条目。
         for bookmarkID in stale {

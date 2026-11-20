@@ -20,6 +20,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var preferredPlacement: SidebarPlacement = .leading
     private var isHandlingChange = false
     private var occlusionObserver: NSObjectProtocol?
+    /// 站点信息逐个抓完会连续触发 onChange，合并成一次刷新。
+    private var siteInfoRefreshWork: DispatchWorkItem?
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -227,8 +229,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         environment.runtime.onCredentialCaptured = { [weak self] candidate in
             self?.presentSaveCredential(candidate)
         }
+        sidebar.onContentInvalidated = { [weak self] in
+            // 详情/聚合可能正显示刚被删除的对象，refreshAll 会据数据是否存在回退到空态。
+            self?.content.refreshAll()
+        }
         environment.siteInfo.onChange = { [weak self] in
-            self?.sidebar.reloadAll()
+            guard let self else { return }
+            // 每个收藏抓完站点信息都会回调一次；逐次 reloadAll 会清空图标缓存并全量重建，
+            // n 个收藏就变成 n 次全量磁盘读取。合并到一次（300ms）即可。
+            self.siteInfoRefreshWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.sidebar.reloadAll()
+                self.content.refreshStatusOnly()
+            }
+            self.siteInfoRefreshWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
         }
     }
 

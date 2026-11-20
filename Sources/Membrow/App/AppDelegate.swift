@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// 退出时停掉内存巡检定时器与内存压力监听，不要把它们留到进程被系统收走。
+    func applicationWillTerminate(_ notification: Notification) {
+        environment?.memoryMonitor.stop()
+    }
+
     // MARK: - Menu actions
 
     @objc private func showSettings(_ sender: Any?) {

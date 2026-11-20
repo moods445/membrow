@@ -14,8 +14,14 @@ enum MemoryDiagnostics {
             print(text)
             fflush(stdout)
             let fileURL = environment.dataDirectory.appendingPathComponent("memory-diagnostics.txt")
-            try? text.write(to: fileURL, atomically: true, encoding: .utf8)
-            completion(0)
+            do {
+                try text.write(to: fileURL, atomically: true, encoding: .utf8)
+                completion(0)
+            } catch {
+                // 诊断文件写不出来必须让脚本/CI 看到，不能用 0 退出码伪装成功。
+                FileHandle.standardError.write(Data("诊断报告写入失败：\(error.localizedDescription)\n".utf8))
+                completion(1)
+            }
         }
     }
 
@@ -30,6 +36,8 @@ enum MemoryDiagnostics {
             ["proc_pid_rusage", MemoryProbe.rusageAvailable ? "可用" : "不可用"],
             ["故障注入", environment.store.settings.forceMemoryAPIFailure ? "开启" : "关闭"],
             ["麦克风", environment.store.settings.microphoneEnabled ? "允许" : "禁止"],
+            ["开机自启", LaunchAtLogin.statusDescription],
+            ["强制深色样式表", ForcedDarkStyleSheet.isAvailable ? "可用" : "不可用（降级为不反色）"],
             ["内存模式", environment.memoryMonitor.modeDisplayName],
         ]
         sections.append(TextTable.render(headers: ["项目", "值"], rows: environmentRows))
@@ -84,7 +92,7 @@ enum MemoryDiagnostics {
         for sample in environment.runtime.memorySamples() {
             let name = environment.store.bookmark(id: sample.bookmarkID)?.trimmedName
                 ?? sample.bookmarkID.uuidString
-            instanceRows.append([name, "动态", sample.isVisible ? "可见" : "隐藏",
+            instanceRows.append([name, "动态", sample.isVisible ? "激活" : "未激活",
                                  MemoryProbe.formatted(sample.footprint)])
         }
         let snapshotSamples = environment.snapshots.memorySamples()

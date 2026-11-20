@@ -19,6 +19,8 @@ final class SettingsWindowController: NSWindowController {
                                                    target: nil, action: nil)
     private let microphoneCheckbox = NSButton(checkboxWithTitle: "允许网页使用麦克风（系统首次仍会询问一次）",
                                               target: nil, action: nil)
+    private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "开机自启（登录时自动打开 Membrow）",
+                                                 target: nil, action: nil)
     private let errorLabel = makeLabel("", font: NSFont.systemFont(ofSize: 11), color: .systemRed)
     private let modeLabel = makeLabel("", font: NSFont.systemFont(ofSize: 11), color: .secondaryLabelColor)
     private let diagnosticsTables = DiagnosticsTablesView()
@@ -35,7 +37,7 @@ final class SettingsWindowController: NSWindowController {
 
     init(environment: AppEnvironment) {
         self.environment = environment
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 872),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 902),
                             styleMask: [.titled, .closable],
                             backing: .buffered,
                             defer: false)
@@ -162,6 +164,7 @@ final class SettingsWindowController: NSWindowController {
             [makeGridLabel("全局代理"), proxyPopup],
             [makeGridLabel(""), proxyHostRow],
             [makeGridLabel("启动策略"), startupRow],
+            [makeGridLabel("启动"), launchAtLoginCheckbox],
             [makeGridLabel("资源"), numericRow],
             [makeGridLabel("媒体"), microphoneCheckbox],
             [makeGridLabel("已保存密码"), credentialRow],
@@ -245,6 +248,8 @@ final class SettingsWindowController: NSWindowController {
         globalTTLField.stringValue = String(settings.globalTTLMinutes)
         faultInjectionCheckbox.state = settings.forceMemoryAPIFailure ? .on : .off
         microphoneCheckbox.state = settings.microphoneEnabled ? .on : .off
+        // 登录项以系统实际状态为准：用户在“系统设置”里手动关掉后，这里也跟着变。
+        launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
         modeLabel.stringValue = environment.memoryMonitor.modeDisplayName
         reloadCredentials()
     }
@@ -272,6 +277,14 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func clearCredentials() {
+        guard !credentialItems.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = "清除全部已保存密码"
+        alert.informativeText = "将删除 \(credentialItems.count) 条钥匙串密码，且无法恢复。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "全部清除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         environment.credentials.deleteAll()
         reloadCredentials()
     }
@@ -296,6 +309,7 @@ final class SettingsWindowController: NSWindowController {
             ["静态超时", "\(Int(settings.staticCaptureTimeout)) 秒"],
             ["全局 TTL", "\(settings.globalTTLMinutes) 分钟"],
             ["麦克风", settings.microphoneEnabled ? "允许（系统授权为准）" : "禁止"],
+            ["开机自启", LaunchAtLogin.statusDescription],
         ]
         diagnosticsTables.update(status: tables.status, instances: tables.instances, config: configRows)
     }
@@ -365,12 +379,26 @@ final class SettingsWindowController: NSWindowController {
         settings.forceMemoryAPIFailure = faultInjectionCheckbox.state == .on
         settings.microphoneEnabled = microphoneCheckbox.state == .on
 
+        // 全部校验通过后再动系统登录项，避免输入有误时已经改掉开机自启。
+        let desiredLaunchAtLogin = launchAtLoginCheckbox.state == .on
+        let loginItemError = desiredLaunchAtLogin == LaunchAtLogin.isEnabled
+            ? nil
+            : LaunchAtLogin.setEnabled(desiredLaunchAtLogin)
+        settings.launchAtLogin = LaunchAtLogin.isEnabled
+
         do {
             try environment.store.updateSettings(settings)
             environment.staticManager.onChange?()
+            // store 会把越界值静默钳制（如内存 100 → 128），回填一次让界面与实际配置一致。
+            populate()
             refreshDiagnostics()
         } catch {
             errorLabel.stringValue = error.localizedDescription
+            return
+        }
+        // 系统拒绝（未安装到 /Applications、签名不稳定、需要人工批准）时保留提示，不静默失败。
+        if let loginItemError {
+            errorLabel.stringValue = loginItemError
         }
     }
 

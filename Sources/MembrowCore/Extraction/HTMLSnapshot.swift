@@ -16,8 +16,9 @@ public enum HTMLSnapshotSanitizer {
         "area", "br", "col", "hr", "img", "link", "meta", "param", "wbr",
     ]
 
-    /// 内容按原样输出的标签（CSS / 预格式化文本），不能做实体转义。
-    private static let rawTextTags: Set<String> = ["style", "pre", "textarea"]
+    /// 内容按原样输出的标签（只有 CSS 需要）；`pre` 的子节点是正常解析的，
+    /// 按原文输出会丢掉 `<pre><code>` 里的文本，还会把已解码的实体重新变成标签。
+    private static let rawTextTags: Set<String> = ["style"]
 
     private static let keptLinkRels: Set<String> = ["stylesheet", "icon", "shortcut icon", "apple-touch-icon"]
 

@@ -21,7 +21,7 @@
 
 1. **不碰用户数据**：任何测试、冒烟、截图都用 `MEMBROW_DATA_DIR=/tmp/...` 的隔离目录；**禁止删除、改名或覆盖** `~/Library/Application Support/com.membrow.app` 与旧目录 `.../Membrow`。测试结束清理 `/tmp` 下的临时目录。
 2. **密钥只进钥匙串**：密码、令牌、Cookie 明文不得写入 JSON / SQLite / 日志 / 错误信息；凭据只能走 `CredentialStore`（`kSecClassInternetPassword`）。
-3. **注入边界**：只允许两类页面脚本——`WKContentRuleList`（资源拦截，不注入 JS）与 `CredentialScript`（仅读写登录表单字段）。禁止冻结 / 快照 / 内容比对脚本、用户自定义脚本、资源劫持。
+3. **注入边界**：只允许三类页面干预——`WKContentRuleList`（资源拦截，不注入 JS）、`CredentialScript`（仅读写登录表单字段）与 `ForcedDarkStyleSheet`（仅注入 CSS，受收藏「深色模式」开关控制，不改写 DOM）。禁止冻结 / 快照 / 内容比对脚本、用户自定义脚本、资源劫持。
 4. **设置向后兼容**：`AppSettings` 新增字段必须用 `decodeIfPresent` + 默认值，保证旧 `settings.json` 可读；同时更新设置界面、`--diagnose` 摘要与自测。
 5. **即时同步文档**：功能/缺陷改动当轮同步 `todos/v0.1-todo.md`；已完成能力同步 `docs/v0.1-实现汇总.md`。UI 文案必须与实际行为一致（删除聚合的提示、拦截开关的“刷新后生效”等）。
 6. **可运行验证**：非平凡逻辑（分支、循环、解析、金额/安全路径）至少留一条可运行断言，放在 `MembrowSelfTest`；UI 层无法自动化的部分在 todo 里写清“待人工复验”。
@@ -54,3 +54,7 @@
 - 资源释放：WKWebView 销毁要 `stopLoading` + 置空 delegate + `removeScriptMessageHandler` + `removeFromSuperview`。
 - 并发：跨任务共享的限流只用一个 `ConcurrencyLimiter`，运行期调上限用 `setLimit`，禁止重建实例（会突破硬上限）。
 - 临时文件/脚本放 `/tmp` 并在结束前清理。
+
+## 构建
+
+- 每次修改完成后，使用 scripts/build-app.sh 构建一次

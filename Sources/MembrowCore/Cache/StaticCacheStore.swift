@@ -73,8 +73,18 @@ public final class StaticCacheStore {
             snapshot_html TEXT
         );
         """)
-        // 旧库没有 snapshot_html 列：补列失败（已存在）可忽略，不影响原有读写。
-        try? execute("ALTER TABLE static_cache ADD COLUMN snapshot_html TEXT;")
+        // 旧库没有 snapshot_html 列：只有“列已存在”可以忽略。
+        // 其余失败（只读库/磁盘满/被锁）必须上抛，否则会拖到第一次写入才报误导性的语句错误。
+        do {
+            try execute("ALTER TABLE static_cache ADD COLUMN snapshot_html TEXT;")
+        } catch {
+            let message = error.localizedDescription.lowercased()
+            if !message.contains("duplicate column") {
+                sqlite3_close(database)
+                self.database = nil
+                throw error
+            }
+        }
     }
 
     deinit {

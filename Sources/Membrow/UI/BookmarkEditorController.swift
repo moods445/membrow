@@ -18,6 +18,7 @@ final class BookmarkEditorController: NSWindowController {
     private let proxyHostField = NSTextField()
     private let proxyPortField = NSTextField()
     private let blockingCheckbox = NSButton(checkboxWithTitle: "启用内容拦截", target: nil, action: nil)
+    private let pageAppearancePopup = NSPopUpButton()
     private let capturePopup = NSPopUpButton()
     private let ttlPopup = NSPopUpButton()
     private let ttlMinutesField = NSTextField()
@@ -70,9 +71,13 @@ final class BookmarkEditorController: NSWindowController {
         ttlPopup.addItems(withTitles: ["继承全局", "不使用缓存", "永不过期", "自定义分钟"])
         extractionPopup.addItems(withTitles: ExtractionKind.allCases.map { $0.displayName })
         displayPopup.addItems(withTitles: StaticDisplayMode.allCases.map { $0.displayName })
+        pageAppearancePopup.addItems(withTitles: PageAppearance.allCases.map(\.displayName))
 
         for field in [nameField, urlField, proxyHostField, proxyPortField, ttlMinutesField, selectorField, waitSelectorField] {
             field.translatesAutoresizingMaskIntoConstraints = false
+        }
+        // 每个字段只能有一条确定宽度：循环里给所有字段都设 380 会与下面的窄宽度约束互斥。
+        for field in [nameField, urlField, selectorField, waitSelectorField] {
             field.widthAnchor.constraint(equalToConstant: 380).isActive = true
         }
         proxyHostField.widthAnchor.constraint(equalToConstant: 180).isActive = true
@@ -114,6 +119,7 @@ final class BookmarkEditorController: NSWindowController {
             [makeLabel("分组", font: .systemFont(ofSize: 12)), groupPopup],
             [makeLabel("代理", font: .systemFont(ofSize: 12)), proxyRow],
             [makeLabel("内容拦截", font: .systemFont(ofSize: 12)), blockingRow],
+            [makeLabel("页面外观", font: .systemFont(ofSize: 12)), pageAppearancePopup],
             [makeLabel("抓取方式", font: .systemFont(ofSize: 12)), captureRow],
             [makeLabel("缓存有效期", font: .systemFont(ofSize: 12)), ttlRow],
             [makeLabel("正文提取", font: .systemFont(ofSize: 12)), extractionRow],
@@ -202,6 +208,9 @@ final class BookmarkEditorController: NSWindowController {
                 proxyPopup.selectItem(at: 0)
             }
             blockingCheckbox.state = bookmark.blockingEnabled ? .on : .off
+            if let index = PageAppearance.allCases.firstIndex(of: bookmark.effectivePageAppearance) {
+                pageAppearancePopup.selectItem(at: index)
+            }
 
             switch bookmark.staticConfig.captureMode {
             case .webView: capturePopup.selectItem(at: 0)
@@ -234,6 +243,7 @@ final class BookmarkEditorController: NSWindowController {
             }
             proxyPopup.selectItem(at: 0)
             blockingCheckbox.state = .on
+            pageAppearancePopup.selectItem(at: PageAppearance.allCases.firstIndex(of: .dark) ?? 0)
             capturePopup.selectItem(at: 0)
             ttlPopup.selectItem(at: 0)
             extractionPopup.selectItem(at: ExtractionKind.allCases.firstIndex(of: .fullPage) ?? 0)
@@ -252,6 +262,12 @@ final class BookmarkEditorController: NSWindowController {
         let index = extractionPopup.indexOfSelectedItem
         guard index >= 0, index < ExtractionKind.allCases.count else { return .fullPage }
         return ExtractionKind.allCases[index]
+    }
+
+    private var selectedPageAppearance: PageAppearance {
+        let index = pageAppearancePopup.indexOfSelectedItem
+        guard index >= 0, index < PageAppearance.allCases.count else { return .system }
+        return PageAppearance.allCases[index]
     }
 
     @objc private func updateEnabledState() {
@@ -364,6 +380,8 @@ final class BookmarkEditorController: NSWindowController {
             ? groupIDs[groupPopup.indexOfSelectedItem]
             : nil
         let kind: BookmarkKind = isStatic ? .staticPage : .dynamic
+        // 默认深色，选择“页面默认”时也显式落盘，避免与旧数据的默认深色混淆。
+        let pageAppearance: PageAppearance? = selectedPageAppearance
 
         do {
             let finalID: UUID
@@ -375,6 +393,7 @@ final class BookmarkEditorController: NSWindowController {
                 bookmark.groupID = groupID
                 bookmark.proxy = proxy
                 bookmark.blockingEnabled = blockingCheckbox.state == .on
+                bookmark.pageAppearance = pageAppearance
                 bookmark.staticConfig = staticConfig
                 // 归属变更由 updateBookmark 负责（会追加到目标列表末尾），
                 // 之前额外调用 moveBookmark 会让每次“编辑”都把收藏挪到分组末尾。
@@ -391,9 +410,12 @@ final class BookmarkEditorController: NSWindowController {
                                                                    proxy: proxy,
                                                                    blockingEnabled: blockingCheckbox.state == .on)
                 created.staticConfig = staticConfig
+                created.pageAppearance = pageAppearance
                 try environment.store.updateBookmark(created)
                 finalID = created.id
             }
+            // 已打开的网页立即换外观；未打开的下次创建时生效。
+            environment.runtime.applyPageAppearance(bookmarkID: finalID)
             let savedID = finalID
             onSaved?(savedID)
             closeSheet()

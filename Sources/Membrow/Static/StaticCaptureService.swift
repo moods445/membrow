@@ -125,35 +125,25 @@ final class StaticCaptureService {
             throw StaticCaptureError.timeout
         }
 
-        // 先在 WebView 里加载完全：didFinish 只代表首帧到了，SPA 之后还会继续挂载内容
-        // （首帧常常只有“加载中…”占位）。等到正文出现（> 40 字）且 DOM 连续 500ms 不再变化
-        // 再取 outerHTML，最多额外等 5 秒。
-        // ponytail: 文本长度阈值 + DOM 签名稳定，不做网络空闲检测；一直等不到就按当前 DOM 抓取。
-        let settleDeadline = min(deadline, Date().addingTimeInterval(5))
-        var lastSignature = ""
-        var stableHits = 0
-        while Date() < settleDeadline {
-            let signature = (try? await webView.evaluateJavaScript(Self.settleSignatureScript) as? String) ?? ""
-            let textLength = Int(signature.split(separator: ":").first ?? "") ?? 0
-            if !signature.isEmpty, signature == lastSignature {
-                stableHits += 1
-            } else {
-                stableHits = 0
-                lastSignature = signature
-            }
-            if textLength > 40 && stableHits >= 2 { break }
-            try await sleep(0.25)
-        }
+        // didFinish 只代表首帧到了，SPA 之后还会继续挂载内容（首帧常常只有“加载中…”占位）。
+        // AGENTS.md #3 只允许 CredentialScript 一类页面脚本，不能用 DOM 签名/内容比对脚本，
+        // 因此这里固定等一小段再取 outerHTML。
+        // ponytail: 固定延迟替代内容稳定判定，慢站可能在正文挂载前抓取；需要时再换允许的机制。
+        let settle = min(1.0, max(deadline.timeIntervalSinceNow, 0))
+        if settle > 0 { try await sleep(settle) }
 
         let waitSelector = bookmark.staticConfig.extraction.trimmedWaitSelector
         if !waitSelector.isEmpty {
             let script = try Self.selectorCheckScript(waitSelector)
+            // 独立预算：前面的加载/等待可能已经用掉整个 deadline，否则元素已存在也会直接误报超时。
+            let selectorDeadline = Date().addingTimeInterval(min(timeout, 5))
             var matched = false
-            while Date() < deadline {
+            while true {
                 if let value = try? await webView.evaluateJavaScript(script) as? Bool, value {
                     matched = true
                     break
                 }
+                if Date() >= selectorDeadline { break }
                 try await sleep(0.2)
             }
             guard matched else {
@@ -168,15 +158,6 @@ final class StaticCaptureService {
 
         return StaticCaptureResult(html: html, finalURL: webView.url ?? url)
     }
-
-    /// DOM 签名：正文长度 + 元素数量，用于判断页面是否仍在继续渲染。
-    private static let settleSignatureScript = """
-    (function () {
-      var body = document.body;
-      var count = document.getElementsByTagName('*').length;
-      return body ? (body.innerText.length + ':' + count) : ('0:' + count);
-    })()
-    """
 
     private static func selectorCheckScript(_ selector: String) throws -> String {
         let data = try JSONEncoder().encode(selector)

@@ -15,6 +15,9 @@ final class ContentSlotView: NSView, ContentHosting {
     private var currentContentView: NSView?
     private var staticView: StaticContentView?
 
+    /// 由 `PaneContainerView` 标记：本 slot 属于聚合面板。
+    var isAggregationPane = false
+
     var onDropBookmark: ((UUID) -> Void)?
     var onFocusRequest: (() -> Void)?
 
@@ -96,8 +99,8 @@ final class ContentSlotView: NSView, ContentHosting {
     // MARK: - Rendering
 
     func refresh() {
+        // staticView 由 render() 内的 load() 一并刷新，重复调用会二次重解析 Markdown。
         render()
-        staticView?.refresh()
     }
 
     /// 显式打开（拖入 pane 等动作）：实例在别处时把 WebView 搬过来。
@@ -145,6 +148,7 @@ final class ContentSlotView: NSView, ContentHosting {
             staticView = view
         }
         installContent(view)
+        view.isAggregationPane = isAggregationPane
         view.load(bookmarkID: bookmark.id, allowAutoCapture: allowStaticCapture)
     }
 

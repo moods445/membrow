@@ -164,7 +164,8 @@ public enum TTLPolicy: Equatable, Codable, Sendable {
         case "neverExpires":
             self = .neverExpires
         case "minutes":
-            self = .minutes(try container.decode(Int.self, forKey: .minutes))
+            // 缺 minutes 键时回落 0（normalized 后为 noCache），避免整份 library.json 解码失败。
+            self = .minutes(try container.decodeIfPresent(Int.self, forKey: .minutes) ?? 0)
         default:
             self = .inherit
         }
@@ -224,12 +225,43 @@ public struct ExtractionRule: Codable, Equatable, Sendable {
 
 // MARK: - Bookmark
 
+/// 网页强制外观：默认跟随页面，或强制深色。
+public enum PageAppearance: String, Codable, CaseIterable, Sendable {
+    case system
+    case dark
+
+    public var displayName: String {
+        switch self {
+        case .system: return "页面默认"
+        case .dark: return "深色模式"
+        }
+    }
+}
+
+/// 强制深色的注入样式：只含 CSS，不改 DOM、不执行 JS。
+public enum ForcedDarkStyle {
+    // ponytail: html 上的 filter 会改变 fixed 元素的包含块，少数依赖 fixed 布局的页面可能偏移；
+    // 这是“对没有深色样式的站点强制变暗”的固有代价。内联 SVG 不反回，避免黑色图标在黑底上消失。
+    public static let css = """
+    html {
+      background: #fff !important;
+      filter: invert(1) hue-rotate(180deg) !important;
+    }
+    img, video, picture, canvas {
+      filter: invert(1) hue-rotate(180deg) !important;
+    }
+    """
+}
+
 /// 动态收藏的专属配置（切换到静态时保留但不生效）。
 public struct DynamicConfig: Codable, Equatable, Sendable {
     public var isPinned: Bool
+    /// 页面外观；nil 表示旧数据未配置，按默认“深色模式”处理。
+    public var pageAppearance: PageAppearance?
 
-    public init(isPinned: Bool = false) {
+    public init(isPinned: Bool = false, pageAppearance: PageAppearance? = nil) {
         self.isPinned = isPinned
+        self.pageAppearance = pageAppearance
     }
 }
 
@@ -327,6 +359,17 @@ public struct Bookmark: Identifiable, Codable, Equatable, Sendable {
     public var isPinned: Bool {
         get { dynamicConfig.isPinned }
         set { dynamicConfig.isPinned = newValue }
+    }
+
+    /// 页面外观：存放在动态配置里，静态收藏保留但不用。
+    public var pageAppearance: PageAppearance? {
+        get { dynamicConfig.pageAppearance }
+        set { dynamicConfig.pageAppearance = newValue }
+    }
+
+    /// 页面外观取值：默认强制深色；旧数据未配置时也按深色处理。
+    public var effectivePageAppearance: PageAppearance {
+        pageAppearance ?? .dark
     }
 }
 
@@ -660,9 +703,28 @@ public struct PaneSplit: Identifiable, Codable, Equatable, Sendable {
                 second: PaneNode) {
         self.id = id
         self.axis = axis
-        self.ratio = min(max(ratio, 0.1), 0.9)
+        self.ratio = Self.clampedRatio(ratio)
         self.first = first
         self.second = second
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, axis, ratio, first, second
+    }
+
+    /// 合成的解码器会绕过 init 的夹紧逻辑，手工编辑/旧版的 sessions.json 可能写入越界比例。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        axis = try container.decode(SplitAxis.self, forKey: .axis)
+        ratio = Self.clampedRatio(try container.decodeIfPresent(Double.self, forKey: .ratio) ?? 0.5)
+        first = try container.decode(PaneNode.self, forKey: .first)
+        second = try container.decode(PaneNode.self, forKey: .second)
+    }
+
+    private static func clampedRatio(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.5 }
+        return min(max(value, 0.1), 0.9)
     }
 }
 
@@ -892,6 +954,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var forceMemoryAPIFailure: Bool
     /// 允许网页使用麦克风。关闭后媒体权限一律拒绝；开启后不再逐站点询问。
     public var microphoneEnabled: Bool
+    /// 随登录启动（系统登录项）的意向值；实际是否生效以 `SMAppService.mainApp.status` 为准。
+    public var launchAtLogin: Bool
 
     public init(globalProxy: ProxySettings = ProxySettings(),
                 startupPolicy: StartupPolicy = .doNotRestore,
@@ -903,7 +967,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 globalTTLMinutes: Int = 24 * 60,
                 memoryBudgetMB: Int = AppSettings.defaultMemoryBudgetMB,
                 forceMemoryAPIFailure: Bool = false,
-                microphoneEnabled: Bool = true) {
+                microphoneEnabled: Bool = true,
+                launchAtLogin: Bool = false) {
         self.globalProxy = globalProxy
         self.startupPolicy = startupPolicy
         self.startupBookmarkID = startupBookmarkID
@@ -915,6 +980,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.memoryBudgetMB = memoryBudgetMB
         self.forceMemoryAPIFailure = forceMemoryAPIFailure
         self.microphoneEnabled = microphoneEnabled
+        self.launchAtLogin = launchAtLogin
     }
 
     public static let staticConcurrencyHardLimit = 4
@@ -933,6 +999,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case memoryBudgetMB
         case forceMemoryAPIFailure
         case microphoneEnabled
+        case launchAtLogin
     }
 
     /// 逐字段 `decodeIfPresent`：新增字段后旧 settings.json 仍可读取，不会因缺键整份失效。
@@ -957,6 +1024,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
             ?? defaults.forceMemoryAPIFailure
         microphoneEnabled = try container.decodeIfPresent(Bool.self, forKey: .microphoneEnabled)
             ?? defaults.microphoneEnabled
+        launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
+            ?? defaults.launchAtLogin
         normalize()
     }
 

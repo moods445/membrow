@@ -83,8 +83,21 @@ PLIST
 
 plutil -lint "$APP/Contents/Info.plist" > /dev/null
 
-codesign --force --deep --sign - "$APP"
+# 签名身份：优先用本地自签名证书（跨构建稳定，TCC 授权不会被作废），找不到才回退 ad-hoc。
+# ad-hoc 的 designated requirement 只有 cdhash，重新构建后 macOS 会把新包当成另一个 app，
+# 已授权的麦克风等隐私权限失效，于是每次启动都重新弹窗。
+SIGN_IDENTITY="${MEMBROW_SIGN_IDENTITY:-Membrow Local Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
+    SIGN_NOTE="本地自签名（${SIGN_IDENTITY}）"
+else
+    codesign --force --deep --sign - "$APP"
+    SIGN_NOTE="ad-hoc（无开发者证书，未公证）"
+    echo "警告：未找到签名身份「${SIGN_IDENTITY}」，已回退 ad-hoc。" >&2
+    echo "      ad-hoc 签名每次重建都会让麦克风等系统授权失效（每次都重新弹窗）。" >&2
+    echo "      一次性修复：./scripts/ensure-sign-identity.sh" >&2
+fi
 codesign --verify --deep --strict "$APP"
 
 echo "已生成：$APP"
-echo "签名：ad-hoc（无开发者证书，未公证）"
+echo "签名：$SIGN_NOTE"

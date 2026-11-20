@@ -125,17 +125,21 @@ public struct InstanceMemorySample: Equatable, Sendable {
     public let isPinned: Bool
     /// 最后一次可见时间，LRU 依据。
     public let lastVisibleAt: Date
+    /// WebContent 进程号：多个实例共享同一进程时，进程级 footprint 只能计一次。
+    public let processIdentifier: Int32?
 
     public init(bookmarkID: UUID,
                 footprint: Int64?,
                 isVisible: Bool,
                 isPinned: Bool,
-                lastVisibleAt: Date) {
+                lastVisibleAt: Date,
+                processIdentifier: Int32? = nil) {
         self.bookmarkID = bookmarkID
         self.footprint = footprint
         self.isVisible = isVisible
         self.isPinned = isPinned
         self.lastVisibleAt = lastVisibleAt
+        self.processIdentifier = processIdentifier
     }
 
     public var isEvictable: Bool { !isVisible && !isPinned }
@@ -183,11 +187,30 @@ public enum MemoryGovernor {
 
     /// 计算淘汰计划。precise 模式按 1GB 预算；degraded 模式按实例上限与内存压力。
     public static func plan(samples: [InstanceMemorySample], mode: MemoryMode) -> MemoryPlan {
+        let samples = deduplicatedByProcess(samples)
         switch mode {
         case .precise(let budget):
             return precisePlan(samples: samples, budget: budget, mode: mode)
         case .degraded(let limit, let pressure):
             return degradedPlan(samples: samples, instanceLimit: limit, pressure: pressure, mode: mode)
+        }
+    }
+
+    /// 同一 WebContent 进程（WKWebView 默认共享进程池）的 footprint 是进程级的：
+    /// 按实例重复累加会让 1GB 预算被提前触发并误杀 LRU 实例，这里按 pid 只保留第一次读数。
+    public static func deduplicatedByProcess(_ samples: [InstanceMemorySample]) -> [InstanceMemorySample] {
+        var seen: Set<Int32> = []
+        return samples.map { sample in
+            guard let pid = sample.processIdentifier, sample.footprint != nil else { return sample }
+            guard seen.insert(pid).inserted else {
+                return InstanceMemorySample(bookmarkID: sample.bookmarkID,
+                                            footprint: nil,
+                                            isVisible: sample.isVisible,
+                                            isPinned: sample.isPinned,
+                                            lastVisibleAt: sample.lastVisibleAt,
+                                            processIdentifier: pid)
+            }
+            return sample
         }
     }
 

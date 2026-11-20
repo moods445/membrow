@@ -42,6 +42,8 @@ final class PaneContainerView: NSView {
         self.paneID = paneID
         self.slot = ContentSlotView(environment: environment)
         super.init(frame: .zero)
+        // pane 属于当前聚合面板：面板内收藏（含放大时被盖住的）都按前台激活豁免回收。
+        slot.isAggregationPane = true
         setup()
     }
 
@@ -121,6 +123,8 @@ final class PaneContainerView: NSView {
         } else if clickMonitor == nil {
             clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
                 guard let self, let window = self.window, event.window === window else { return event }
+                // 放大/隐藏的 pane 仍保留上次布局的 frame，不排除会把焦点抢到看不见的 pane 上。
+                guard !self.isHiddenOrHasHiddenAncestor else { return event }
                 let point = self.convert(event.locationInWindow, from: nil)
                 if self.bounds.contains(point) {
                     self.onFocus?()
@@ -325,9 +329,12 @@ final class PaneLayoutView: NSView {
                     guard let bookmarkID = pane.bookmarkID else { return }
                     environment.runtime.closeWebPage(bookmarkID: bookmarkID)
                 }
-                view.onOpenFromEntry = {
-                    guard let bookmarkID = pane.bookmarkID else { return }
-                    environment.runtime.openFromEntry(bookmarkID: bookmarkID, in: view.slot)
+                view.onOpenFromEntry = { [weak self] in
+                    // 不能强捕获 view：闭包存放在 view 自己身上，会形成 view → closure → view 的环。
+                    guard let self,
+                          let slot = self.paneViews[pane.id]?.slot,
+                          let bookmarkID = slot.bookmarkID else { return }
+                    environment.runtime.openFromEntry(bookmarkID: bookmarkID, in: slot)
                 }
                 view.slot.onDropBookmark = { [weak self] bookmarkID in
                     self?.handleDrop(bookmarkID: bookmarkID, paneID: pane.id)
@@ -357,27 +364,37 @@ final class PaneLayoutView: NSView {
 
     override func layout() {
         super.layout()
-        for view in paneViews.values {
-            view.isHidden = true
-        }
+        // 只按最终可见性赋值一次：先全隐藏再显示会让每个 pane 走一遍 viewDidHide/Unhide，
+        // 触发 refreshVisibility → render（静态页还会重解析 Markdown）。
         guard let session, let root = session.root else {
+            for view in paneViews.values where !view.isHidden {
+                view.isHidden = true
+            }
             updateVisibility()
             return
         }
 
+        var visible: Set<UUID> = []
         if let zoomedID = session.zoomedPaneID, let view = paneViews[zoomedID] {
             view.frame = bounds
-            view.isHidden = false
+            visible.insert(zoomedID)
         } else {
-            layoutNode(root, in: bounds)
+            layoutNode(root, in: bounds, visible: &visible)
+        }
+        for (id, view) in paneViews {
+            let shouldHide = !visible.contains(id)
+            if view.isHidden != shouldHide {
+                view.isHidden = shouldHide
+            }
         }
         updateVisibility()
     }
 
-    private func layoutNode(_ node: PaneNode, in rect: NSRect) {
+    private func layoutNode(_ node: PaneNode, in rect: NSRect, visible: inout Set<UUID>) {
         switch node {
         case .pane(let pane):
             guard let view = paneViews[pane.id] else { return }
+            visible.insert(pane.id)
             // 尺寸可能为 0（首次布局、窗口极小）：负宽高会让 AppKit 生成超限的 autoresizing 约束。
             view.frame = NSRect(x: rect.minX + 1,
                                 y: rect.minY + 1,
@@ -397,8 +414,8 @@ final class PaneLayoutView: NSView {
                                         y: rect.minY,
                                         width: rect.width,
                                         height: max(available - firstHeight, 0))
-                layoutNode(split.first, in: firstRect)
-                layoutNode(split.second, in: secondRect)
+                layoutNode(split.first, in: firstRect, visible: &visible)
+                layoutNode(split.second, in: secondRect, visible: &visible)
             } else {
                 let available = max(rect.width - divider, 0)
                 let firstWidth = min(max(floor(available * CGFloat(split.ratio)), 0), available)
@@ -410,8 +427,8 @@ final class PaneLayoutView: NSView {
                                         y: rect.minY,
                                         width: max(available - firstWidth, 0),
                                         height: rect.height)
-                layoutNode(split.first, in: firstRect)
-                layoutNode(split.second, in: secondRect)
+                layoutNode(split.first, in: firstRect, visible: &visible)
+                layoutNode(split.second, in: secondRect, visible: &visible)
             }
         }
     }

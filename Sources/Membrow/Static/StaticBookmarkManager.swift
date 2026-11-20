@@ -96,7 +96,7 @@ final class StaticBookmarkManager {
                     return
                 }
                 do {
-                    try self.store.cache.save(document, for: bookmark.id)
+                    try self.store.saveCachedDocument(document, for: bookmark.id)
                     self.phases[bookmark.id] = .idle
                 } catch {
                     self.phases[bookmark.id] = .failed("缓存写入失败：\(error.localizedDescription)")

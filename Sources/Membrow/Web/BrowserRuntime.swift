@@ -108,6 +108,7 @@ final class BrowserRuntime {
 
         terminations[bookmarkID] = nil
         instance.host = host
+        applyAppearance(bookmark.effectivePageAppearance, to: instance)
         host.attachWebView(instance.webView)
 
         if useEntry {
@@ -148,10 +149,12 @@ final class BrowserRuntime {
         webView.navigationDelegate = handler
         webView.uiDelegate = handler
 
-        return WebInstance(bookmarkID: bookmark.id,
-                           webView: webView,
-                           handler: handler,
-                           blockingEnabled: bookmark.blockingEnabled)
+        let instance = WebInstance(bookmarkID: bookmark.id,
+                                   webView: webView,
+                                   handler: handler,
+                                   blockingEnabled: bookmark.blockingEnabled)
+        applyAppearance(bookmark.effectivePageAppearance, to: instance)
+        return instance
     }
 
     private func load(_ instance: WebInstance, url: URL?) {
@@ -273,23 +276,50 @@ final class BrowserRuntime {
         }
     }
 
+    /// 收藏级外观变更后立即应用：WebKit 会重新计算 prefers-color-scheme，无需刷新。
+    func applyPageAppearance(bookmarkID: UUID) {
+        guard let instance = instances[bookmarkID],
+              let bookmark = store.bookmark(id: bookmarkID) else { return }
+        applyAppearance(bookmark.effectivePageAppearance, to: instance)
+    }
+
+    /// NSAppearance 负责 prefers-color-scheme；强制深色再叠加 CSS 反色（无深色样式的站点也能变暗）。
+    private func applyAppearance(_ appearance: PageAppearance, to instance: WebInstance) {
+        instance.webView.appearance = appearance.webAppearance
+        let controller = instance.webView.configuration.userContentController
+        switch (appearance, instance.forcedDarkStyleSheet) {
+        case (.dark, nil):
+            instance.forcedDarkStyleSheet = ForcedDarkStyleSheet.add(to: controller)
+        case (.system, let sheet?):
+            ForcedDarkStyleSheet.remove(sheet, from: controller)
+            instance.forcedDarkStyleSheet = nil
+        case (.dark, _), (.system, nil):
+            break
+        }
+    }
+
     // MARK: - Memory samples
 
     func memorySamples() -> [InstanceMemorySample] {
         let now = Date()
         return instances.values.map { instance in
             let bookmark = store.bookmark(id: instance.bookmarkID)
-            // 可见性以宿主实时状态为准：instance.isVisible 只在 refreshVisibility 时更新，
-            // 切换收藏后新实例、窗口遮挡变化都可能让它滞后为 false，
-            // 那会把前台正在看的页面喂成"可淘汰"。
-            let visible = instance.host?.isEffectivelyVisible ?? false
+            // 直接看实例自己的 WebView：挂在窗口里且没被隐藏＝激活中。
+            // 不看遮挡状态——应用退到后台或被别的窗口盖住时，这一页仍是用户要回来的页面，
+            // 不能因为一分钟没看到就把它淘汰掉。被移出容器/隐藏 pane 的 WebView 不在此列。
+            // 例外：当前聚合面板里的 pane 全部算前台激活，放大时被盖住的 pane 也豁免回收。
+            let inAggregationPane = instance.host?.isAggregationPane == true
+            let visible = instance.webView.window.map { $0.isVisible } == true
+                && (inAggregationPane || !instance.webView.isHiddenOrHasHiddenAncestor)
             instance.isVisible = visible
             if visible { instance.lastVisibleAt = now }
+            let pid = MemoryProbe.webProcessIdentifier(of: instance.webView)
             return InstanceMemorySample(bookmarkID: instance.bookmarkID,
-                                        footprint: MemoryProbe.footprint(of: instance.webView),
+                                        footprint: pid.flatMap { MemoryProbe.footprint(of: $0) },
                                         isVisible: visible,
                                         isPinned: bookmark?.isPinned ?? false,
-                                        lastVisibleAt: instance.lastVisibleAt)
+                                        lastVisibleAt: instance.lastVisibleAt,
+                                        processIdentifier: pid)
         }
     }
 
@@ -319,6 +349,12 @@ final class BrowserRuntime {
         let username = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, !username.isEmpty, !password.isEmpty,
               username.count <= 256, password.count <= 512 else { return }
+        // 消息来源已由 handler 校验；这里再确认提交页面就是当前主框架，避免跨站导航瞬间的错配。
+        if let currentHost = instances[bookmarkID]?.currentURL?.host,
+           !currentHost.isEmpty,
+           SiteMatcher.normalizedHost(currentHost) != host {
+            return
+        }
         guard credentials.password(forHost: host, username: username) != password else { return }
         onCredentialCaptured?(CredentialCandidate(bookmarkID: bookmarkID,
                                                   host: host,
@@ -356,5 +392,15 @@ final class BrowserRuntime {
 
     private func notifyChange() {
         onChange?()
+    }
+}
+
+extension PageAppearance {
+    /// 页面默认交还系统外观；深色模式让 WebKit 的 prefers-color-scheme 判定为 dark。
+    var webAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
     }
 }

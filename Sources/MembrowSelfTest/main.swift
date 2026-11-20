@@ -85,6 +85,7 @@ final class Harness {
         await testConcurrencyLimiter()
         await testConcurrencyLimiterDynamicLimit()
         await testSettingsEdges()
+        await testDataRecovery()
         testSettingsCompatibility()
         testDataDirectory()
         testSiteMetadata()
@@ -320,6 +321,16 @@ final class Harness {
             check(snapshot.contains("src=\"/logo.png\"") && snapshot.contains("alt=\"logo\""),
                   "快照保留图片属性")
             check(!snapshot.contains("</img>"), "快照图片自闭合")
+
+            // pre 里的 code 子节点必须按正常元素序列化：既不能整段丢失，也不能把实体还原成标签。
+            let codeHTML = """
+            <html><body><pre><code class="lang">let x = 1 &lt; 2</code></pre>
+            <pre>&lt;script&gt;alert(1)&lt;/script&gt;</pre></body></html>
+            """
+            let codeSnapshot = HTMLSnapshotSanitizer.sanitize(html: codeHTML)
+            check(codeSnapshot.contains("<code"), "快照保留 pre 内的 code 元素")
+            check(codeSnapshot.contains("let x = 1 &lt; 2"), "快照保留代码文本并转义")
+            check(!codeSnapshot.contains("<script>"), "pre 内实体不会被还原成标签")
         } catch {
             failures += 1
             print("FAIL snapshot tests threw: \(error)")
@@ -460,6 +471,36 @@ final class Harness {
             check(generic.markdown.contains("第一段正文"), "通用提取正文")
             check(!generic.markdown.contains("首页"), "通用提取排除导航")
 
+            // 带空格的子组合器 `div > p` 不能退化成后代选择器。
+            let nestedHTML = """
+            <html><body><div><p>直接子</p><section><p>深层后代</p></section></div></body></html>
+            """
+            let nested = HTMLParser.parse(nestedHTML)
+            let directChildren = try CSSSelector.matches(selector: "div > p", in: nested)
+            checkEqual(directChildren.count, 1, "子组合器只匹配直接子节点")
+            checkEqual(directChildren.first?.textContent, "直接子", "子组合器命中正确节点")
+            let descendants = try CSSSelector.matches(selector: "div p", in: nested)
+            checkEqual(descendants.count, 2, "后代选择器仍匹配所有后代")
+
+            // 实体解码必须有界：大量裸 & 不能退化成 O(n²) 或吞掉字符。
+            checkEqual(HTMLParser.decodeEntities("a &amp; b"), "a & b", "实体解码")
+            let bareAmpersands = String(repeating: "&", count: 20_000)
+            checkEqual(HTMLParser.decodeEntities(bareAmpersands), bareAmpersands, "裸 & 原样保留")
+
+            // 不可信页面可以有上千层嵌套：解析深度必须有上限，否则递归遍历会爆栈。
+            let deepHTML = String(repeating: "<div>", count: 2000)
+                + "x"
+                + String(repeating: "</div>", count: 2000)
+            var maxDepth = 0
+            var pending: [(HTMLNode, Int)] = [(HTMLParser.parse(deepHTML), 0)]
+            while let (node, depth) = pending.popLast() {
+                maxDepth = max(maxDepth, depth)
+                for child in node.children {
+                    pending.append((child, depth + 1))
+                }
+            }
+            check(maxDepth <= HTMLParser.maxDepth, "解析嵌套深度有上限")
+
             let table = try ExtractorFactory.extract(
                 html: "<html><body><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table></body></html>",
                 pageURL: pageURL,
@@ -551,6 +592,21 @@ final class Harness {
         checkEqual(MemoryGovernor.sampleInterval(sampleCount: 2,
                                                   mode: .degraded(instanceLimit: 4, pressure: .warning),
                                                   plan: under), 2, "内存压力时回到 2 秒")
+
+        // 默认进程池共享 WebContent：同一 pid 的进程级 footprint 只能计一次。
+        let shared = [
+            InstanceMemorySample(bookmarkID: UUID(), footprint: 400_000_000, isVisible: false,
+                                 isPinned: false, lastVisibleAt: now, processIdentifier: 100),
+            InstanceMemorySample(bookmarkID: UUID(), footprint: 400_000_000, isVisible: false,
+                                 isPinned: false, lastVisibleAt: now.addingTimeInterval(-10),
+                                 processIdentifier: 100),
+            InstanceMemorySample(bookmarkID: UUID(), footprint: 100_000_000, isVisible: false,
+                                 isPinned: false, lastVisibleAt: now, processIdentifier: 200),
+        ]
+        let sharedPlan = MemoryGovernor.plan(samples: shared,
+                                             mode: .precise(budgetBytes: MemoryGovernor.dynamicBudgetBytes))
+        checkEqual(sharedPlan.totalFootprint, 500_000_000, "共享进程内存只计一次")
+        check(sharedPlan.evict.isEmpty, "不因重复计数误杀实例")
     }
 
     // MARK: Site matcher
@@ -715,6 +771,7 @@ final class Harness {
     private func testSettingsCompatibility() {
         checkEqual(AppSettings().memoryBudgetMB, 1024, "默认内存预算 1024MB")
         checkEqual(AppSettings().memoryBudgetBytes, 1024 * 1024 * 1024, "默认预算换算为 1GB")
+        checkEqual(AppSettings().launchAtLogin, false, "默认不随登录启动")
 
         var settings = AppSettings()
         settings.memoryBudgetMB = 0
@@ -735,6 +792,7 @@ final class Harness {
             checkEqual(decoded.staticConcurrency, 3, "旧配置数值保留")
             checkEqual(decoded.maxInstancesWhenDegraded, 4, "缺失字段回退默认值")
             checkEqual(decoded.microphoneEnabled, true, "旧配置缺字段时默认允许麦克风")
+            checkEqual(decoded.launchAtLogin, false, "旧配置缺字段时默认不开机自启")
         } catch {
             failures += 1
             print("FAIL 旧版 settings.json 解码失败：\(error)")
@@ -750,6 +808,55 @@ final class Harness {
             failures += 1
             print("FAIL 麦克风设置解码失败：\(error)")
         }
+
+        let autoStart = """
+        {"launchAtLogin":true}
+        """
+        do {
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(autoStart.utf8))
+            checkEqual(decoded.launchAtLogin, true, "显式开启的开机自启被保留")
+        } catch {
+            failures += 1
+            print("FAIL 开机自启设置解码失败：\(error)")
+        }
+
+        checkEqual(PageAppearance.dark.displayName, "深色模式", "深色模式显示名")
+        let legacyBookmark = """
+        {"id":"6C7C3908-57C9-4A37-9B9C-25B9F8E4D7A1","name":"Example","entryURL":"https://example.com","kind":"dynamic","blockingEnabled":true,"dynamicConfig":{"isPinned":false},"staticConfig":{}}
+        """
+        do {
+            let decoded = try JSONDecoder().decode(Bookmark.self, from: Data(legacyBookmark.utf8))
+            checkEqual(decoded.effectivePageAppearance, .dark, "旧收藏缺字段时默认深色")
+            checkEqual(decoded.pageAppearance, nil, "旧收藏不写入页面外观")
+        } catch {
+            failures += 1
+            print("FAIL 旧版收藏解码失败：\(error)")
+        }
+
+        let lightBookmark = """
+        {"id":"6C7C3908-57C9-4A37-9B9C-25B9F8E4D7A1","name":"Example","entryURL":"https://example.com","kind":"dynamic","blockingEnabled":true,"dynamicConfig":{"isPinned":false,"pageAppearance":"system"},"staticConfig":{}}
+        """
+        do {
+            let decoded = try JSONDecoder().decode(Bookmark.self, from: Data(lightBookmark.utf8))
+            checkEqual(decoded.effectivePageAppearance, .system, "显式页面默认被保留")
+        } catch {
+            failures += 1
+            print("FAIL 页面默认外观解码失败：\(error)")
+        }
+
+        let darkBookmark = """
+        {"id":"6C7C3908-57C9-4A37-9B9C-25B9F8E4D7A1","name":"Example","entryURL":"https://example.com","kind":"dynamic","blockingEnabled":true,"dynamicConfig":{"isPinned":false,"pageAppearance":"dark"},"staticConfig":{}}
+        """
+        do {
+            let decoded = try JSONDecoder().decode(Bookmark.self, from: Data(darkBookmark.utf8))
+            checkEqual(decoded.effectivePageAppearance, .dark, "收藏级深色外观被保留")
+        } catch {
+            failures += 1
+            print("FAIL 收藏页面外观解码失败：\(error)")
+        }
+
+        check(ForcedDarkStyle.css.contains("invert(1) hue-rotate(180deg)"), "强制深色样式包含反色")
+        check(ForcedDarkStyle.css.contains("img, video, picture, canvas"), "强制深色样式保护位图与视频")
     }
 
     // MARK: Credential scripts
@@ -766,6 +873,74 @@ final class Harness {
         check(!CredentialScript.capture.contains("document.cookie"), "捕获脚本不读取 Cookie")
         check(CredentialScript.fill(username: "u", password: "p").contains("password.value"),
               "填充前检查密码框是否已有内容")
+    }
+
+    // MARK: Data recovery and decoding
+
+    private func testDataRecovery() async {
+        // 损坏的 library.json：必须备份原文件，不能在下一次持久化时被空库覆盖。
+        do {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MembrowSelfTest-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { cleanup(directory) }
+
+            let broken = "{\"bookmarks\":[{\"id\":\"not-a-uuid\"}"
+            try Data(broken.utf8).write(to: directory.appendingPathComponent("library.json"))
+
+            let store = try AppStore(directory: directory)
+            check(!store.loadWarnings.isEmpty, "损坏的 library.json 产生读取告警")
+            check(store.library.bookmarks.isEmpty, "损坏时以空库继续运行")
+
+            let backups = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .filter { $0.hasPrefix("library.json.corrupt-") }
+            checkEqual(backups.count, 1, "损坏文件被改名备份")
+
+            _ = try? store.createBookmark(name: "新收藏", entryURL: "https://example.com", kind: .dynamic)
+            let backupText = try String(contentsOf: directory.appendingPathComponent(backups[0]),
+                                        encoding: .utf8)
+            checkEqual(backupText, broken, "备份保留原始内容，不被空库覆盖")
+        } catch {
+            failures += 1
+            print("FAIL data recovery tests threw: \(error)")
+        }
+
+        // 旧数据缺 minutes 键时不能拖垮整份 library.json。
+        do {
+            let ttl = try JSONDecoder().decode(TTLPolicy.self, from: Data("{\"kind\":\"minutes\"}".utf8))
+            checkEqual(ttl.normalized, .noCache, "TTL 缺 minutes 时回落为不使用缓存")
+        } catch {
+            failures += 1
+            print("FAIL TTL 缺字段解码失败：\(error)")
+        }
+
+        // sessions.json 里的越界分割比例在解码时被夹紧。
+        do {
+            let split = PaneSplit(axis: .vertical,
+                                  ratio: 0.5,
+                                  first: .pane(Pane()),
+                                  second: .pane(Pane()))
+            let encoded = try JSONEncoder().encode(split)
+            if let text = String(data: encoded, encoding: .utf8),
+               let tampered = text.replacingOccurrences(of: "\"ratio\":0.5", with: "\"ratio\":5")
+                   .data(using: .utf8) {
+                let decoded = try JSONDecoder().decode(PaneSplit.self, from: tampered)
+                checkEqual(decoded.ratio, 0.9, "解码时夹紧分割比例")
+            } else {
+                failures += 1
+                print("FAIL 无法构造越界 ratio 的 sessions.json")
+            }
+        } catch {
+            failures += 1
+            print("FAIL PaneSplit 解码失败：\(error)")
+        }
+
+        // meta charset 必须优先于 GB18030 兜底，否则 Big5/Latin1 页面会静默变乱码。
+        var latin = Data("<html><head><meta charset=\"iso-8859-1\"></head><body>caf".utf8)
+        latin.append(0xE9)
+        latin.append(contentsOf: Data("</body></html>".utf8))
+        let decoded = HTTPTextDecoder.decode(data: latin, charset: nil)
+        check(decoded?.contains("café") == true, "按 meta charset 解码非 UTF-8 页面")
     }
 
     // MARK: Validation edges

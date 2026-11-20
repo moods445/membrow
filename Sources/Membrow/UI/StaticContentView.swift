@@ -22,8 +22,14 @@ final class StaticContentView: NSView {
     private var snapshotWebView: WKWebView?
     private var snapshotTopConstraint: NSLayoutConstraint?
     private var usesSnapshot = false
+    /// 位于当前聚合面板：快照与 pane 同属前台内容，放大时被盖住也不回收。
+    var isAggregationPane = false
     /// 快照因内存预算被回收后不再自动重建，直到用户点刷新或切换收藏。
     private var snapshotEvicted = false
+    /// 快照 WebView 上的强制深色样式表；随快照释放。
+    private var snapshotDarkSheet: NSObject?
+    /// 上次真正重建内容的键：内容没变时不重载，避免 30 秒巡检把阅读位置拉回顶部、快照整页闪烁。
+    private var lastRenderKey: String?
 
     var onUseOriginalPage: ((UUID) -> Void)?
 
@@ -124,6 +130,7 @@ final class StaticContentView: NSView {
             didAutoCapture = false
             textView.string = ""
             snapshotEvicted = false
+            lastRenderKey = nil
             teardownSnapshot()
         }
         self.allowAutoCapture = allowAutoCapture
@@ -138,6 +145,7 @@ final class StaticContentView: NSView {
         guard let environment,
               let bookmarkID,
               let bookmark = environment.store.bookmark(id: bookmarkID) else {
+            lastRenderKey = nil
             messageView.configure(symbol: "○", title: "没有可展示的收藏")
             showMessage(true)
             statusLabel.stringValue = ""
@@ -145,6 +153,11 @@ final class StaticContentView: NSView {
         }
 
         usesSnapshot = bookmark.staticConfig.displayMode == .snapshot
+        // 收藏级强制外观：Markdown 视图跟随系统外观，快照 WebView 另加反色样式表。
+        appearance = bookmark.effectivePageAppearance.webAppearance
+        if let snapshotWebView {
+            applySnapshotAppearance(bookmark.effectivePageAppearance, to: snapshotWebView)
+        }
         let phase = environment.staticManager.phase(for: bookmark.id)
         let document = environment.staticManager.document(for: bookmark.id)
         let freshness = environment.store.freshness(for: bookmark)
@@ -184,6 +197,19 @@ final class StaticContentView: NSView {
         }
         statusLabel.stringValue = statusText
         statusLabel.toolTip = statusText
+
+        let renderKey = [
+            bookmark.id.uuidString,
+            String(document?.fetchedAt.timeIntervalSince1970 ?? 0),
+            String(document?.markdown.count ?? -1),
+            String(document?.snapshotHTML?.count ?? -1),
+            usesSnapshot ? "snapshot" : "markdown",
+            snapshotEvicted ? "evicted" : "live",
+            String(describing: phase),
+        ].joined(separator: "|")
+        // 状态文字已经更新；内容没变就不重建，保住滚动位置与快照加载状态。
+        guard renderKey != lastRenderKey else { return }
+        lastRenderKey = renderKey
 
         if let document {
             render(document)
@@ -241,6 +267,9 @@ final class StaticContentView: NSView {
             snapshotWebView = web
         }
         snapshotWebView?.isHidden = false
+        let pageAppearance = bookmarkID
+            .flatMap { environment?.store.bookmark(id: $0)?.effectivePageAppearance } ?? .system
+        applySnapshotAppearance(pageAppearance, to: web)
         // 纳入内存监控：可见时免淘汰，隐藏 pane 的快照按 LRU 回收。
         if let bookmarkID {
             environment?.snapshots.register(
@@ -254,7 +283,10 @@ final class StaticContentView: NSView {
     }
 
     private var isSnapshotVisible: Bool {
-        guard let window, window.isVisible, !isHiddenOrHasHiddenAncestor else { return false }
+        guard let window, window.isVisible else { return false }
+        // 聚合面板内的快照不看遮挡与放大遮盖：面板还在前台，快照就随 pane 一起豁免。
+        if isAggregationPane { return true }
+        guard !isHiddenOrHasHiddenAncestor else { return false }
         return window.occlusionState.contains(.visible)
     }
 
@@ -274,7 +306,7 @@ final class StaticContentView: NSView {
     private func teardownSnapshot() {
         guard let web = snapshotWebView else { return }
         if let bookmarkID {
-            environment?.snapshots.unregister(bookmarkID: bookmarkID)
+            environment?.snapshots.unregister(bookmarkID: bookmarkID, webView: web)
         }
         web.stopLoading()
         web.navigationDelegate = nil
@@ -282,6 +314,28 @@ final class StaticContentView: NSView {
         snapshotTopConstraint?.isActive = false
         snapshotTopConstraint = nil
         snapshotWebView = nil
+        snapshotDarkSheet = nil
+    }
+
+    /// 强制外观变化时重算容器背景（textBackgroundColor 是动态颜色）。
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+    }
+
+    /// 快照 WebView 的外观与反色样式表：内容未变时也要能随收藏配置即时切换。
+    private func applySnapshotAppearance(_ appearance: PageAppearance, to web: WKWebView) {
+        web.appearance = appearance.webAppearance
+        let controller = web.configuration.userContentController
+        switch (appearance, snapshotDarkSheet) {
+        case (.dark, nil):
+            snapshotDarkSheet = ForcedDarkStyleSheet.add(to: controller)
+        case (.system, let sheet?):
+            ForcedDarkStyleSheet.remove(sheet, from: controller)
+            snapshotDarkSheet = nil
+        case (.dark, _), (.system, nil):
+            break
+        }
     }
 
     private func renderMarkdown(_ document: CachedDocument) {

@@ -9,7 +9,8 @@ final class MemoryMonitor {
         let name: String
         let footprint: Int64?
         let isPinned: Bool
-        /// 是否正显示在屏幕上。可见页面不参与回收，也不该弹“超限”提示。
+        /// 是否豁免回收。动态实例取“激活中”（挂在窗口里未隐藏，不看遮挡；当前聚合面板内的 pane 一律激活）；
+        /// 静态快照取屏幕可见（当前聚合面板内的快照同样豁免）。激活页面不参与回收，也不该弹“超限”提示。
         let isVisible: Bool
     }
 
@@ -176,7 +177,8 @@ final class MemoryMonitor {
         var instanceRows: [[String]] = []
         for sample in dynamicSamples.sorted(by: { $0.lastVisibleAt > $1.lastVisibleAt }) {
             let name = store.bookmark(id: sample.bookmarkID)?.trimmedName ?? sample.bookmarkID.uuidString
-            let state = (sample.isVisible ? "可见" : "隐藏") + (sample.isPinned ? " · 固定" : "")
+            // 动态实例的“激活”不看遮挡：应用在后台也照常显示，聚合面板内被放大的 pane 也算激活。
+            let state = (sample.isVisible ? "激活" : "未激活") + (sample.isPinned ? " · 固定" : "")
             instanceRows.append([name, "动态", state, MemoryProbe.formatted(sample.footprint)])
         }
         for sample in snapshotSamples {

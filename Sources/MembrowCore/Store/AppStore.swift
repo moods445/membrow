@@ -39,6 +39,7 @@ public enum AppStoreError: Error, LocalizedError {
     case invalidURL
     case invalidProxy(String)
     case invalidSettings(String)
+    case cacheUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -50,6 +51,7 @@ public enum AppStoreError: Error, LocalizedError {
         case .invalidURL: return "请输入有效的 http 或 https 地址"
         case .invalidProxy(let message): return message
         case .invalidSettings(let message): return message
+        case .cacheUnavailable: return "静态缓存数据库不可用"
         }
     }
 }
@@ -61,12 +63,19 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var settings: AppSettings
 
     public let directory: URL
-    public let cache: StaticCacheStore
+    /// 缓存是可重建的派生数据：数据库打不开时置 nil，不能因此阻止整个应用启动。
+    public let cache: StaticCacheStore?
     public private(set) var loadWarnings: [String] = []
-    public private(set) var lastPersistenceError: String?
 
     private let fileStore: JSONFileStore
     public var now: () -> Date
+
+    /// 每个文件独立记录写盘错误：一个文件写成功不能抹掉另一个文件的失败。
+    private var persistenceErrors: [String: String] = [:]
+    /// 读取失败且无法备份的文件：停止写入，避免用空数据覆盖用户原文件。
+    private var blockedFiles: Set<String> = []
+
+    public var lastPersistenceError: String? { persistenceErrors.values.first }
 
     private enum FileName {
         static let library = "library.json"
@@ -78,78 +87,81 @@ public final class AppStore: ObservableObject {
     public init(directory: URL, now: @escaping () -> Date = Date.init) throws {
         self.directory = directory
         self.now = now
-        self.fileStore = JSONFileStore(directory: directory)
+        let fileStore = JSONFileStore(directory: directory)
+        self.fileStore = fileStore
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        self.cache = try StaticCacheStore(path: directory.appendingPathComponent(FileName.cache))
 
         var warnings: [String] = []
+        var blocked: Set<String> = []
 
-        do {
-            if let library = try fileStore.load(Library.self, from: FileName.library) {
-                self.library = library
-            } else {
-                self.library = Library()
+        /// 解码失败时先把原文件改名备份，再用空数据继续：
+        /// 否则下一次 persist 会用空库原子覆盖，用户的收藏/聚合永久丢失。
+        func recover<T: Decodable>(_ type: T.Type, from name: String) -> T? {
+            do {
+                return try fileStore.load(type, from: name)
+            } catch let loadError {
+                let backupName = "\(name).corrupt-\(Self.timestamp())"
+                do {
+                    try FileManager.default.moveItem(at: fileStore.url(for: name),
+                                                     to: fileStore.url(for: backupName))
+                    warnings.append("\(name) 读取失败：\(loadError.localizedDescription)（原文件已备份为 \(backupName)）")
+                } catch {
+                    blocked.insert(name)
+                    warnings.append("\(name) 读取失败：\(loadError.localizedDescription)；无法备份，已停止写入该文件以免覆盖原数据")
+                }
+                return nil
             }
-        } catch {
-            warnings.append("library.json 读取失败：\(error.localizedDescription)")
-            self.library = Library()
         }
 
-        do {
-            if let sessions = try fileStore.load([Session].self, from: FileName.sessions) {
-                self.sessions = sessions
-            } else {
-                self.sessions = []
-            }
-        } catch {
-            warnings.append("sessions.json 读取失败：\(error.localizedDescription)")
-            self.sessions = []
+        let cache = try? StaticCacheStore(path: directory.appendingPathComponent(FileName.cache))
+        if cache == nil {
+            warnings.append("静态缓存数据库打开失败，本次运行不读写缓存（可删除 \(FileName.cache) 后重试）")
         }
+        self.cache = cache
 
-        do {
-            if let settings = try fileStore.load(AppSettings.self, from: FileName.settings) {
-                self.settings = settings.normalizedSettings()
-            } else {
-                self.settings = AppSettings()
-            }
-        } catch {
-            warnings.append("settings.json 读取失败：\(error.localizedDescription)")
-            self.settings = AppSettings()
-        }
-
+        self.library = recover(Library.self, from: FileName.library) ?? Library()
+        self.sessions = recover([Session].self, from: FileName.sessions) ?? []
+        self.settings = recover(AppSettings.self, from: FileName.settings)?.normalizedSettings() ?? AppSettings()
+        self.blockedFiles = blocked
         self.loadWarnings = warnings
+
         self.library.normalize()
         for index in self.sessions.indices {
             self.sessions[index].normalize()
         }
     }
 
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
     // MARK: Persistence
 
     private func persistLibrary() {
-        do {
-            try fileStore.save(library, to: FileName.library)
-            lastPersistenceError = nil
-        } catch {
-            lastPersistenceError = "收藏保存失败：\(error.localizedDescription)"
-        }
+        persist(library, to: FileName.library, failurePrefix: "收藏保存失败")
     }
 
     private func persistSessions() {
-        do {
-            try fileStore.save(sessions, to: FileName.sessions)
-            lastPersistenceError = nil
-        } catch {
-            lastPersistenceError = "聚合保存失败：\(error.localizedDescription)"
-        }
+        persist(sessions, to: FileName.sessions, failurePrefix: "聚合保存失败")
     }
 
     private func persistSettings() {
+        persist(settings, to: FileName.settings, failurePrefix: "设置保存失败")
+    }
+
+    private func persist<T: Encodable>(_ value: T, to name: String, failurePrefix: String) {
+        guard !blockedFiles.contains(name) else {
+            persistenceErrors[name] = "\(failurePrefix)：原文件读取失败且无法备份，已停止写入以免覆盖"
+            return
+        }
         do {
-            try fileStore.save(settings, to: FileName.settings)
-            lastPersistenceError = nil
+            try fileStore.save(value, to: name)
+            persistenceErrors[name] = nil
         } catch {
-            lastPersistenceError = "设置保存失败：\(error.localizedDescription)"
+            persistenceErrors[name] = "\(failurePrefix)：\(error.localizedDescription)"
         }
     }
 
@@ -177,14 +189,14 @@ public final class AppStore: ObservableObject {
     }
 
     public func freshness(for bookmark: Bookmark) -> CacheFreshness {
-        let document = try? cache.load(bookmarkID: bookmark.id)
-        return ttlEvaluator().freshness(ttl: bookmark.staticConfig.ttl,
-                                        fetchedAt: document?.fetchedAt,
-                                        now: now())
+        ttlEvaluator().freshness(ttl: bookmark.staticConfig.ttl,
+                                 fetchedAt: cachedDocument(for: bookmark.id)?.fetchedAt,
+                                 now: now())
     }
 
     public func cachedDocument(for bookmarkID: UUID) -> CachedDocument? {
-        try? cache.load(bookmarkID: bookmarkID)
+        guard let cache else { return nil }
+        return try? cache.load(bookmarkID: bookmarkID)
     }
 
     // MARK: Bookmarks
@@ -269,7 +281,13 @@ public final class AppStore: ObservableObject {
     public func deleteBookmark(id: UUID) {
         guard library.bookmark(id: id) != nil else { return }
         library.removeBookmark(id: id)
-        try? cache.delete(bookmarkID: id)
+        if let cache {
+            do {
+                try cache.delete(bookmarkID: id)
+            } catch {
+                persistenceErrors[FileName.cache] = "缓存清理失败：\(error.localizedDescription)"
+            }
+        }
         for index in sessions.indices {
             sessions[index].clearBookmark(id)
         }
@@ -464,11 +482,25 @@ public final class AppStore: ObservableObject {
 
     // MARK: Static cache
 
+    public func saveCachedDocument(_ document: CachedDocument, for bookmarkID: UUID) throws {
+        guard let cache else { throw AppStoreError.cacheUnavailable }
+        try cache.save(document, for: bookmarkID)
+    }
+
     public func store(_ document: CachedDocument, for bookmarkID: UUID) {
-        try? cache.save(document, for: bookmarkID)
+        do {
+            try saveCachedDocument(document, for: bookmarkID)
+        } catch {
+            persistenceErrors[FileName.cache] = "缓存写入失败：\(error.localizedDescription)"
+        }
     }
 
     public func removeCachedDocument(for bookmarkID: UUID) {
-        try? cache.delete(bookmarkID: bookmarkID)
+        guard let cache else { return }
+        do {
+            try cache.delete(bookmarkID: bookmarkID)
+        } catch {
+            persistenceErrors[FileName.cache] = "缓存清理失败：\(error.localizedDescription)"
+        }
     }
 }

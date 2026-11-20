@@ -94,6 +94,8 @@ final class SidebarViewController: NSViewController {
     var onCreateBookmark: (() -> Void)?
     var onCreateGroup: (() -> Void)?
     var onCreateSession: (() -> Void)?
+    /// 删除收藏/聚合后通知内容区：内容区可能正显示已被删掉的对象。
+    var onContentInvalidated: (() -> Void)?
 
     private let sessionsTable = NSTableView()
     private let outlineView = NSOutlineView()
@@ -286,10 +288,11 @@ final class SidebarViewController: NSViewController {
         suppressSelection = true
         sessionsTable.reloadData()
         sessionsTable.selectRowIndexes(sessionRowIndexes(), byExtendingSelection: false)
-        if outlineView.numberOfRows > 0 {
-            outlineView.reloadData(forRowIndexes: IndexSet(0..<outlineView.numberOfRows),
-                                   columnIndexes: IndexSet(integer: 0))
-        }
+        // rebuildItems 会新建 SidebarItem，仅按行刷新会让 NSOutlineView 继续持有上一代对象，
+        // row(forItem:) 随后返回 -1，选择/定位静默失效。这里按新数据重建整棵树。
+        outlineView.reloadItem(nil, reloadChildren: true)
+        restoreExpansion()
+        restoreSelection()
         suppressSelection = false
     }
 
@@ -356,6 +359,8 @@ final class SidebarViewController: NSViewController {
     func selectSession(id: UUID) {
         guard let environment,
               let index = environment.store.sessions.firstIndex(where: { $0.id == id }) else { return }
+        // 表尚未 reload（首次启动 applyStartupPolicy 早于 reloadAll）时行选择会越界。
+        guard index < sessionsTable.numberOfRows else { return }
         suppressSelection = true
         sessionsTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         suppressSelection = false
@@ -431,8 +436,12 @@ final class SidebarViewController: NSViewController {
         prompt(title: "重命名收藏",
                message: "输入新的收藏名称。",
                defaultValue: bookmark.name) { value in
-            try? environment.store.renameBookmark(id: bookmark.id, name: value)
-            self.reloadAll()
+            do {
+                try environment.store.renameBookmark(id: bookmark.id, name: value)
+                self.reloadAll()
+            } catch {
+                self.showOperationError(error)
+            }
         }
     }
 
@@ -449,6 +458,8 @@ final class SidebarViewController: NSViewController {
                 self.selectedBookmarkID = nil
             }
             self.reloadAll()
+            // discardInstance 在没有实例时不会通知内容区，详情/聚合可能继续显示已删除的收藏。
+            self.onContentInvalidated?()
         }
     }
 
@@ -493,8 +504,12 @@ final class SidebarViewController: NSViewController {
         prompt(title: "重命名分组",
                message: "输入新的分组名称。",
                defaultValue: group.name) { value in
-            try? environment.store.renameGroup(id: group.id, name: value)
-            self.reloadAll()
+            do {
+                try environment.store.renameGroup(id: group.id, name: value)
+                self.reloadAll()
+            } catch {
+                self.showOperationError(error)
+            }
         }
     }
 
@@ -525,8 +540,12 @@ final class SidebarViewController: NSViewController {
         prompt(title: "重命名聚合",
                message: "输入新的聚合名称。",
                defaultValue: session.name) { value in
-            try? environment.store.renameSession(id: session.id, name: value)
-            self.reloadAll()
+            do {
+                try environment.store.renameSession(id: session.id, name: value)
+                self.reloadAll()
+            } catch {
+                self.showOperationError(error)
+            }
         }
     }
 
@@ -538,6 +557,8 @@ final class SidebarViewController: NSViewController {
                 message: "删除聚合“\(session.name)”？其中的 Pane 布局会一并移除，绑定的网页转为不可见并由内存管控回收。") {
             environment.store.deleteSession(id: session.id)
             self.reloadAll()
+            // deleteSession 不会触发运行时通知：内容区可能仍在展示已删除的聚合。
+            self.onContentInvalidated?()
         }
     }
 
@@ -558,6 +579,14 @@ final class SidebarViewController: NSViewController {
         let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         completion(value)
+    }
+
+    private func showOperationError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "操作失败"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     private func confirm(title: String, message: String, action: @escaping () -> Void) {
