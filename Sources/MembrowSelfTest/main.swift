@@ -90,6 +90,7 @@ final class Harness {
         testDataDirectory()
         testSiteMetadata()
         testCredentialScripts()
+        testDiagnosticLog()
 
         if failures == 0 {
             print("PASS \(checks) checks")
@@ -793,6 +794,7 @@ final class Harness {
             checkEqual(decoded.maxInstancesWhenDegraded, 4, "缺失字段回退默认值")
             checkEqual(decoded.microphoneEnabled, true, "旧配置缺字段时默认允许麦克风")
             checkEqual(decoded.launchAtLogin, false, "旧配置缺字段时默认不开机自启")
+            checkEqual(decoded.developerMode, false, "旧配置缺字段时默认关闭开发者模式")
         } catch {
             failures += 1
             print("FAIL 旧版 settings.json 解码失败：\(error)")
@@ -941,6 +943,69 @@ final class Harness {
         latin.append(contentsOf: Data("</body></html>".utf8))
         let decoded = HTTPTextDecoder.decode(data: latin, charset: nil)
         check(decoded?.contains("café") == true, "按 meta charset 解码非 UTF-8 页面")
+    }
+
+    // MARK: Diagnostics
+
+    private func testDiagnosticLog() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MembrowLogTest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let log = DiagnosticLog(directory: directory, maxFileBytes: 512)
+        log.info("页面加载完成", category: "web", fields: ["url": "https://example.com/a"])
+        log.warn("HTTP 404", category: "http", fields: ["status": "404"])
+        log.error("导航失败", category: "web", fields: ["code": "-1009"])
+        log.flush()
+
+        let infoURL = directory.appendingPathComponent(DiagnosticLog.infoFileName)
+        let problemURL = directory.appendingPathComponent(DiagnosticLog.problemFileName)
+        let infoLines = readLines(infoURL)
+        let problemLines = readLines(problemURL)
+        checkEqual(infoLines.count, 1, "info 单独写入 info.jsonl")
+        checkEqual(problemLines.count, 2, "warn 与 error 合并进 problems.jsonl")
+        checkEqual(jsonField(problemLines.first, "level"), "warn", "warn 行级别")
+        checkEqual(jsonField(problemLines.last, "level"), "error", "error 行级别")
+        checkEqual(jsonField(infoLines.first, "message"), "页面加载完成", "日志保留消息文本")
+        if let line = problemLines.first.flatMap({ $0.data(using: .utf8) }),
+           let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+           let fields = object["fields"] as? [String: String] {
+            checkEqual(fields["status"], "404", "结构化字段写入 fields")
+        } else {
+            failures += 1
+            print("FAIL 日志行不是合法 JSON 对象")
+        }
+
+        // 超过单文件上限后轮转：旧内容进 .1，当前文件重新从 0 开始。
+        for index in 0..<20 {
+            log.info("填充第 \(index) 条日志用于触发轮转", category: "test")
+        }
+        log.flush()
+        check(FileManager.default.fileExists(atPath: infoURL.appendingPathExtension("1").path),
+              "超过上限后生成 info.jsonl.1")
+        let size = fileSize(infoURL)
+        check(size <= 512, "当前 info.jsonl 不超过上限，实际 \(size) 字节")
+        check(readLines(infoURL).allSatisfy { $0.contains("\"level\":\"info\"") },
+              "轮转后当前文件只含 info 记录")
+    }
+
+    private func readLines(_ url: URL) -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").map(String.init)
+    }
+
+    private func fileSize(_ url: URL) -> Int {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? Int else { return -1 }
+        return size
+    }
+
+    private func jsonField(_ line: String?, _ key: String) -> String? {
+        guard let line, let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object[key] as? String
     }
 
     // MARK: Validation edges

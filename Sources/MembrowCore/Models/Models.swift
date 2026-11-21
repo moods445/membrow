@@ -956,6 +956,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var microphoneEnabled: Bool
     /// 随登录启动（系统登录项）的意向值；实际是否生效以 `SMAppService.mainApp.status` 为准。
     public var launchAtLogin: Bool
+    /// 开发者模式：网页实例允许右键“检查元素”（WKWebView.isInspectable）。诊断日志不受此开关影响，始终记录。
+    public var developerMode: Bool
 
     public init(globalProxy: ProxySettings = ProxySettings(),
                 startupPolicy: StartupPolicy = .doNotRestore,
@@ -968,7 +970,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 memoryBudgetMB: Int = AppSettings.defaultMemoryBudgetMB,
                 forceMemoryAPIFailure: Bool = false,
                 microphoneEnabled: Bool = true,
-                launchAtLogin: Bool = false) {
+                launchAtLogin: Bool = false,
+                developerMode: Bool = false) {
         self.globalProxy = globalProxy
         self.startupPolicy = startupPolicy
         self.startupBookmarkID = startupBookmarkID
@@ -981,6 +984,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.forceMemoryAPIFailure = forceMemoryAPIFailure
         self.microphoneEnabled = microphoneEnabled
         self.launchAtLogin = launchAtLogin
+        self.developerMode = developerMode
     }
 
     public static let staticConcurrencyHardLimit = 4
@@ -1000,6 +1004,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case forceMemoryAPIFailure
         case microphoneEnabled
         case launchAtLogin
+        case developerMode
     }
 
     /// 逐字段 `decodeIfPresent`：新增字段后旧 settings.json 仍可读取，不会因缺键整份失效。
@@ -1026,6 +1031,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
             ?? defaults.microphoneEnabled
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
             ?? defaults.launchAtLogin
+        developerMode = try container.decodeIfPresent(Bool.self, forKey: .developerMode)
+            ?? defaults.developerMode
         normalize()
     }
 

@@ -14,6 +14,8 @@ final class WebInstance {
     var didLoadOnce = false
     var lastError: String?
     var currentURL: URL?
+    /// 本次导航开始时间，用于日志里的耗时（秒级精度够用，不参与业务判断）。
+    var navigationStartedAt: Date?
     var blockingEnabled: Bool
     /// 强制深色样式表实例；私有接口不可用时为 nil。
     var forcedDarkStyleSheet: NSObject?
@@ -72,6 +74,22 @@ final class WebViewHandler: NSObject, WKNavigationDelegate, WKUIDelegate, WKScri
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         runtime?.handleLoadFailure(bookmarkID: bookmarkID, error: error)
+    }
+
+    /// 主框架响应：把 4xx/5xx 记进诊断日志。WKWebView 不会把“服务器返回 500”当导航失败，
+    /// 这里读 statusCode 是唯一能拿到 HTTP 错误的公开入口；决策仍是放行，页面照常显示错误页。
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard navigationResponse.isForMainFrame,
+              let http = navigationResponse.response as? HTTPURLResponse else {
+            decisionHandler(.allow)
+            return
+        }
+        runtime?.handleNavigationResponse(bookmarkID: bookmarkID,
+                                          statusCode: http.statusCode,
+                                          url: http.url)
+        decisionHandler(.allow)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

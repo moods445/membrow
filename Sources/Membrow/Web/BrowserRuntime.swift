@@ -144,6 +144,7 @@ final class BrowserRuntime {
                          forMainFrameOnly: true))
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isInspectable = store.settings.developerMode
         webView.allowsBackForwardNavigationGestures = true
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = handler
@@ -219,6 +220,7 @@ final class BrowserRuntime {
         guard let instance = instances.removeValue(forKey: bookmarkID) else { return }
         terminations[bookmarkID] = .closed
         teardown(instance)
+        log(.info, "关闭网页", category: "memory", bookmarkID: bookmarkID)
         notifyChange()
     }
 
@@ -226,6 +228,7 @@ final class BrowserRuntime {
         guard let instance = instances.removeValue(forKey: bookmarkID) else { return }
         terminations[bookmarkID] = .evicted
         teardown(instance)
+        log(.info, "回收网页实例", category: "memory", bookmarkID: bookmarkID)
         notifyChange()
     }
 
@@ -326,7 +329,10 @@ final class BrowserRuntime {
     // MARK: - Delegate callbacks
 
     func handleDidStart(bookmarkID: UUID) {
-        instances[bookmarkID]?.lastError = nil
+        guard let instance = instances[bookmarkID] else { return }
+        instance.lastError = nil
+        instance.navigationStartedAt = Date()
+        log(.info, "开始加载", category: "web", bookmarkID: bookmarkID)
     }
 
     func handleDidFinish(bookmarkID: UUID, url: URL?) {
@@ -338,6 +344,12 @@ final class BrowserRuntime {
         }
         instance.lastError = nil
         terminations[bookmarkID] = nil
+        var fields = ["url": logURL(instance.currentURL)]
+        if let startedAt = instance.navigationStartedAt {
+            fields["ms"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+        }
+        instance.navigationStartedAt = nil
+        log(.info, "加载完成", category: "web", bookmarkID: bookmarkID, fields: fields)
         notifyChange()
     }
 
@@ -380,6 +392,13 @@ final class BrowserRuntime {
         }
         guard let instance = instances[bookmarkID] else { return }
         instance.lastError = error.localizedDescription
+        instance.navigationStartedAt = nil
+        log(.error, "导航失败", category: "web", bookmarkID: bookmarkID, fields: [
+            "domain": nsError.domain,
+            "code": String(nsError.code),
+            "detail": error.localizedDescription,
+            "url": logURL(instance.currentURL ?? instance.webView.url),
+        ])
         notifyChange()
     }
 
@@ -387,7 +406,55 @@ final class BrowserRuntime {
         guard let instance = instances.removeValue(forKey: bookmarkID) else { return }
         terminations[bookmarkID] = .crashed
         teardown(instance)
+        log(.error, "网页进程终止", category: "web", bookmarkID: bookmarkID)
         notifyChange()
+    }
+
+    /// HTTP 4xx/5xx：4xx 记 warn（多为页面/接口自身问题），5xx 记 error（服务端故障）。
+    func handleNavigationResponse(bookmarkID: UUID, statusCode: Int, url: URL?) {
+        guard statusCode >= 400 else { return }
+        log(statusCode >= 500 ? .error : .warn,
+            "HTTP \(statusCode)",
+            category: "http",
+            bookmarkID: bookmarkID,
+            fields: ["status": String(statusCode), "url": logURL(url)])
+    }
+
+    // MARK: - Diagnostics
+
+    /// 开发者模式只影响能否打开 Web Inspector；诊断日志始终记录。
+    func applyDeveloperMode() {
+        let enabled = store.settings.developerMode
+        for instance in instances.values {
+            instance.webView.isInspectable = enabled
+        }
+    }
+
+    private func log(_ level: DiagnosticLog.Level,
+                     _ message: String,
+                     category: String,
+                     bookmarkID: UUID,
+                     fields: [String: String] = [:]) {
+        var fields = fields
+        fields["bookmark"] = store.bookmark(id: bookmarkID)?.trimmedName ?? ""
+        switch level {
+        case .info:
+            DiagnosticLog.shared.info(message, category: category, fields: fields)
+        case .warn:
+            DiagnosticLog.shared.warn(message, category: category, fields: fields)
+        case .error:
+            DiagnosticLog.shared.error(message, category: category, fields: fields)
+        }
+    }
+
+    /// 日志里的 URL 去掉 query 与 fragment：避免把令牌、会话 ID 写进磁盘。
+    private func logURL(_ url: URL?) -> String {
+        guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return ""
+        }
+        components.query = nil
+        components.fragment = nil
+        return components.string ?? ""
     }
 
     private func notifyChange() {

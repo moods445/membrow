@@ -12,7 +12,7 @@
 - 命令：
   ```bash
   swift build                                   # 0 Swift 告警是提交门槛
-  .build/debug/MembrowSelfTest                  # 核心断言（当前 177 checks）
+  .build/debug/MembrowSelfTest                  # 核心断言（当前 221 checks）
   ./scripts/build-app.sh [debug|release]        # 生成 dist/Membrow.app（ad-hoc 签名）
   dist/Membrow.app/Contents/MacOS/Membrow --diagnose-memory
   ```
