@@ -170,6 +170,8 @@ final class BookmarkDetailView: NSView {
 
     @objc private func reloadTapped() {
         guard let bookmarkID else { return }
+        // 图标缺失时随刷新补抓，老收藏不重配也能补上。
+        environment?.siteInfo.refreshIconIfMissing(bookmarkID: bookmarkID)
         environment?.runtime.reload(bookmarkID: bookmarkID)
     }
 

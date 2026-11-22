@@ -88,8 +88,20 @@ plutil -lint "$APP/Contents/Info.plist" > /dev/null
 # 已授权的麦克风等隐私权限失效，于是每次启动都重新弹窗。
 SIGN_IDENTITY="${MEMBROW_SIGN_IDENTITY:-Membrow Local Signing}"
 if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
-    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
-    SIGN_NOTE="本地自签名（${SIGN_IDENTITY}）"
+    # 私钥访问可能被沙箱或锁定的登录钥匙串拒绝，codesign 会报 errSecInternalComponent；
+    # 这时仍回退 ad-hoc，保证产物可用，但会把原因和后果明确打出来。
+    if SIGN_OUTPUT="$(codesign --force --deep --sign "$SIGN_IDENTITY" "$APP" 2>&1)"; then
+        SIGN_NOTE="本地自签名（${SIGN_IDENTITY}）"
+    else
+        echo "警告：使用「${SIGN_IDENTITY}」签名失败：${SIGN_OUTPUT}" >&2
+        if printf '%s' "$SIGN_OUTPUT" | grep -q "errSecInternalComponent"; then
+            echo "      钥匙串拒绝访问签名私钥（常见于沙箱环境或锁屏的登录钥匙串）。" >&2
+            echo "      请在普通终端重跑本脚本，或先执行 security unlock-keychain。" >&2
+        fi
+        echo "      本次回退 ad-hoc 以保证构建产物可用；ad-hoc 重建后系统授权（麦克风等）会失效。" >&2
+        codesign --force --deep --sign - "$APP"
+        SIGN_NOTE="ad-hoc（签名私钥不可访问，回退）"
+    fi
 else
     codesign --force --deep --sign - "$APP"
     SIGN_NOTE="ad-hoc（无开发者证书，未公证）"

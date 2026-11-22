@@ -85,6 +85,90 @@ final class SidebarCellView: NSTableCellView {
     }
 }
 
+/// 图标栏滚动文档视图：翻转坐标系让内容从顶部开始显示，内部竖向堆栈承载图标。
+@MainActor
+private final class RailContentView: NSView {
+    let stack: NSStackView
+
+    override init(frame frameRect: NSRect) {
+        stack = NSStackView()
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.distribution = .gravityAreas
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isFlipped: Bool { true }
+}
+
+/// 图标栏里的单个图标：固定 19pt 方块，选中时用 accent 圆角背景高亮。
+/// 右键不自己组装菜单，只把事件交给上级，保持与完整侧栏同一套菜单逻辑。
+@MainActor
+private final class RailIconButton: NSButton {
+    enum Content {
+        case session(UUID)
+        case bookmark(UUID)
+        case group(UUID)
+    }
+
+    let content: Content
+    /// 上级返回要弹出的菜单；nil 表示不弹。
+    var menuProvider: (() -> NSMenu?)?
+
+    init(content: Content) {
+        self.content = content
+        super.init(frame: NSRect(x: 0, y: 0,
+                                 width: SidebarLayout.railIconSize,
+                                 height: SidebarLayout.railIconSize))
+        wantsLayer = true
+        bezelStyle = .inline
+        isBordered = false
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyUpOrDown
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: SidebarLayout.railIconSize),
+            heightAnchor.constraint(equalToConstant: SidebarLayout.railIconSize),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(icon: NSImage?, toolTip: String) {
+        image = icon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+        self.toolTip = toolTip
+    }
+
+    /// 选中态：accent 圆角背景 + 白色符号；未选中透明背景 + 常规符号色。
+    func setSelected(_ selected: Bool) {
+        layer?.cornerRadius = 6
+        layer?.backgroundColor = selected ? NSColor.controlAccentColor.cgColor : nil
+        contentTintColor = selected ? .white : .labelColor
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let menu = menuProvider?(), menu.numberOfItems > 0 else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+}
+
 @MainActor
 final class SidebarViewController: NSViewController {
     private weak var environment: AppEnvironment?
@@ -114,6 +198,15 @@ final class SidebarViewController: NSViewController {
     private var iconCache: [UUID: NSImage] = [:]
     private var missingIconIDs: Set<UUID> = []
 
+    /// 当前显示模式。外部只读，切换由主窗口控制器调用 applyDisplayMode 驱动（同时维护厚度与持久化）。
+    private(set) var displayMode: SidebarDisplayMode = .expanded
+    /// 完整侧栏（图标 + 标题）容器：图标栏模式下整体隐藏。
+    private let fullContent = NSView()
+    /// 仅图标栏：竖向滚动的图标列。
+    private let railScroll = NSScrollView()
+    private let railContent = RailContentView()
+    private var railStack: NSStackView { railContent.stack }
+
     init(environment: AppEnvironment) {
         self.environment = environment
         super.init(nibName: nil, bundle: nil)
@@ -129,6 +222,10 @@ final class SidebarViewController: NSViewController {
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         view = root
 
+        // 完整侧栏装进容器：图标栏模式下只需隐藏这一个视图。
+        fullContent.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(fullContent)
+
         let sessionsHeader = makeSectionHeader(title: "聚合",
                                                addAction: #selector(addSessionTapped),
                                                addToolTip: "新建聚合")
@@ -140,8 +237,8 @@ final class SidebarViewController: NSViewController {
                                                 extraToolTip: "新建分组")
         sessionsHeader.translatesAutoresizingMaskIntoConstraints = false
         bookmarksHeader.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(sessionsHeader)
-        root.addSubview(bookmarksHeader)
+        fullContent.addSubview(sessionsHeader)
+        fullContent.addSubview(bookmarksHeader)
 
         sessionsTable.headerView = nil
         sessionsTable.rowHeight = 24
@@ -165,13 +262,13 @@ final class SidebarViewController: NSViewController {
         sessionsScroll.autohidesScrollers = true
         sessionsScroll.drawsBackground = false
         sessionsScroll.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(sessionsScroll)
+        fullContent.addSubview(sessionsScroll)
 
         let divider = NSView()
         divider.wantsLayer = true
         divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
         divider.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(divider)
+        fullContent.addSubview(divider)
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("bookmark"))
         column.width = 220
@@ -196,33 +293,68 @@ final class SidebarViewController: NSViewController {
         outlineScroll.autohidesScrollers = true
         outlineScroll.drawsBackground = false
         outlineScroll.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(outlineScroll)
+        fullContent.addSubview(outlineScroll)
+
+        setupRail()
+        root.addSubview(railScroll)
 
         NSLayoutConstraint.activate([
-            sessionsHeader.topAnchor.constraint(equalTo: root.topAnchor),
-            sessionsHeader.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sessionsHeader.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            // 两种模式各自铺满根视图，靠 isHidden 互斥。
+            fullContent.topAnchor.constraint(equalTo: root.topAnchor),
+            fullContent.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            fullContent.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            fullContent.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            railScroll.topAnchor.constraint(equalTo: root.topAnchor),
+            railScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            railScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            railScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            sessionsHeader.topAnchor.constraint(equalTo: fullContent.topAnchor),
+            sessionsHeader.leadingAnchor.constraint(equalTo: fullContent.leadingAnchor),
+            sessionsHeader.trailingAnchor.constraint(equalTo: fullContent.trailingAnchor),
             sessionsHeader.heightAnchor.constraint(equalToConstant: 26),
 
             sessionsScroll.topAnchor.constraint(equalTo: sessionsHeader.bottomAnchor),
-            sessionsScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sessionsScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            sessionsScroll.leadingAnchor.constraint(equalTo: fullContent.leadingAnchor),
+            sessionsScroll.trailingAnchor.constraint(equalTo: fullContent.trailingAnchor),
             sessionsScroll.heightAnchor.constraint(equalToConstant: 150),
 
             divider.topAnchor.constraint(equalTo: sessionsScroll.bottomAnchor, constant: 4),
-            divider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            divider.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            divider.leadingAnchor.constraint(equalTo: fullContent.leadingAnchor, constant: 8),
+            divider.trailingAnchor.constraint(equalTo: fullContent.trailingAnchor, constant: -8),
             divider.heightAnchor.constraint(equalToConstant: 1),
 
             bookmarksHeader.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 4),
-            bookmarksHeader.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            bookmarksHeader.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bookmarksHeader.leadingAnchor.constraint(equalTo: fullContent.leadingAnchor),
+            bookmarksHeader.trailingAnchor.constraint(equalTo: fullContent.trailingAnchor),
             bookmarksHeader.heightAnchor.constraint(equalToConstant: 26),
 
             outlineScroll.topAnchor.constraint(equalTo: bookmarksHeader.bottomAnchor),
-            outlineScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            outlineScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            outlineScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            outlineScroll.leadingAnchor.constraint(equalTo: fullContent.leadingAnchor),
+            outlineScroll.trailingAnchor.constraint(equalTo: fullContent.trailingAnchor),
+            outlineScroll.bottomAnchor.constraint(equalTo: fullContent.bottomAnchor),
+        ])
+
+        // 视图已就绪：按调用方（可能早于 loadView）记录的模式决定显隐。
+        applyDisplayMode(displayMode)
+    }
+
+    /// 配置图标栏滚动视图；文档视图用自动布局钉住裁剪视图宽度，高度由内部堆栈决定。
+    private func setupRail() {
+        railScroll.documentView = railContent
+        railScroll.hasVerticalScroller = true
+        railScroll.hasHorizontalScroller = false
+        railScroll.autohidesScrollers = true
+        railScroll.drawsBackground = false
+        railScroll.borderType = .noBorder
+        railScroll.translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint.activate([
+            railContent.topAnchor.constraint(equalTo: railScroll.contentView.topAnchor),
+            railContent.leadingAnchor.constraint(equalTo: railScroll.contentView.leadingAnchor),
+            railContent.trailingAnchor.constraint(equalTo: railScroll.contentView.trailingAnchor),
+            railContent.widthAnchor.constraint(equalTo: railScroll.contentView.widthAnchor),
         ])
     }
 
@@ -280,6 +412,9 @@ final class SidebarViewController: NSViewController {
         restoreExpansion()
         restoreSelection()
         suppressSelection = false
+        // 图标栏与完整侧栏共用同一份数据，一并重建。
+        rebuildRail()
+        updateRailSelection()
     }
 
     func reloadStatuses() {
@@ -294,6 +429,9 @@ final class SidebarViewController: NSViewController {
         restoreExpansion()
         restoreSelection()
         suppressSelection = false
+        // 状态刷新不改聚合/收藏成员：图标栏只需更新高亮。
+        // 整列重建会让图标在每次内存巡检时闪烁并重置滚动位置。
+        updateRailSelection()
     }
 
     private func rebuildItems() {
@@ -364,10 +502,12 @@ final class SidebarViewController: NSViewController {
         suppressSelection = true
         sessionsTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         suppressSelection = false
+        updateRailSelection()
     }
 
     func selectBookmark(id: UUID) {
         selectedBookmarkID = id
+        updateRailSelection()
         guard let item = itemByID[id], outlineView.row(forItem: item) >= 0 else { return }
         suppressSelection = true
         outlineView.selectRowIndexes(IndexSet(integer: outlineView.row(forItem: item)), byExtendingSelection: false)
@@ -403,6 +543,132 @@ final class SidebarViewController: NSViewController {
         }
         iconCache[bookmarkID] = image
         return image
+    }
+
+    // MARK: - 显示模式与图标栏
+
+    /// 切换显示模式。视图尚未加载时只记录模式，等 loadView 再落显隐。
+    func applyDisplayMode(_ mode: SidebarDisplayMode) {
+        displayMode = mode
+        guard isViewLoaded else { return }
+        fullContent.isHidden = (mode == .rail)
+        railScroll.isHidden = (mode == .expanded)
+        rebuildRail()
+        updateRailSelection()
+    }
+
+    /// 重建图标栏：顶部聚合、分隔线，下方根层收藏/分组；展开分组把子收藏紧随其后。
+    private func rebuildRail() {
+        guard isViewLoaded else { return }
+        for subview in railStack.arrangedSubviews {
+            railStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
+
+        guard let environment else { return }
+
+        for session in environment.store.sessions {
+            let button = RailIconButton(content: .session(session.id))
+            button.configure(icon: NSImage(systemSymbolName: "rectangle.split.2x1",
+                                            accessibilityDescription: nil),
+                             toolTip: session.name)
+            button.target = self
+            button.action = #selector(railIconClicked(_:))
+            button.menuProvider = { [weak self] in self?.makeSessionMenu(for: session.id) }
+            railStack.addArrangedSubview(button)
+        }
+
+        // 聚合与收藏之间的分隔线，横跨内容宽度（堆栈左右各 8pt 留白）。
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        railStack.addArrangedSubview(separator)
+        NSLayoutConstraint.activate([
+            separator.heightAnchor.constraint(equalToConstant: 1),
+            separator.widthAnchor.constraint(equalTo: railStack.widthAnchor, constant: -16),
+        ])
+
+        for item in rootItems {
+            switch item.content {
+            case .group(let group):
+                let count = childrenByGroup[group.id]?.count ?? 0
+                let button = RailIconButton(content: .group(group.id))
+                button.configure(icon: NSImage(systemSymbolName: "folder", accessibilityDescription: nil),
+                                 toolTip: "\(group.name) · \(count) 个收藏")
+                button.target = self
+                button.action = #selector(railIconClicked(_:))
+                button.menuProvider = { [weak self] in self?.makeBookmarkMenu(for: item) }
+                railStack.addArrangedSubview(button)
+                // rootItems 里的 group 是上一次 rebuildItems 的快照，展开状态以 store 为准。
+                let isExpanded = environment.store.library.group(id: group.id)?.isExpanded ?? group.isExpanded
+                guard isExpanded else { continue }
+                for child in childrenByGroup[group.id] ?? [] {
+                    addBookmarkRailButton(child)
+                }
+            case .bookmark:
+                addBookmarkRailButton(item)
+            }
+        }
+        updateRailSelection()
+    }
+
+    private func addBookmarkRailButton(_ item: SidebarItem) {
+        guard let bookmark = item.bookmark else { return }
+        let button = RailIconButton(content: .bookmark(bookmark.id))
+        button.configure(icon: siteIcon(for: bookmark.id), toolTip: bookmark.displayTitle)
+        button.target = self
+        button.action = #selector(railIconClicked(_:))
+        button.menuProvider = { [weak self] in self?.makeBookmarkMenu(for: item) }
+        railStack.addArrangedSubview(button)
+    }
+
+    /// 按当前数据刷新图标高亮：聚合看 lastSessionID，收藏看 selectedBookmarkID。
+    private func updateRailSelection() {
+        guard isViewLoaded, let environment else { return }
+        let lastSessionID = environment.store.settings.lastSessionID
+        for subview in railStack.arrangedSubviews {
+            guard let button = subview as? RailIconButton else { continue }
+            switch button.content {
+            case .session(let id):
+                button.setSelected(id == lastSessionID)
+            case .bookmark(let id):
+                button.setSelected(id == selectedBookmarkID)
+            case .group:
+                button.setSelected(false)
+            }
+        }
+    }
+
+    @objc private func railIconClicked(_ sender: RailIconButton) {
+        switch sender.content {
+        case .session(let id):
+            openSession(id: id)
+        case .bookmark(let id):
+            guard let item = itemByID[id] else { return }
+            activateBookmark(item)
+        case .group(let id):
+            guard let item = itemByID[id] else { return }
+            // 与完整侧栏一致：选中分组后，新建收藏默认进该组。
+            selectedGroupID = id
+            toggleGroupExpansion(for: item)
+        }
+    }
+
+    /// 为图标栏的聚合构造菜单（复用 rebuildSessionMenu，representedObject 传会话 ID）。
+    private func makeSessionMenu(for sessionID: UUID) -> NSMenu? {
+        guard let environment,
+              let row = environment.store.sessions.firstIndex(where: { $0.id == sessionID }) else { return nil }
+        let menu = NSMenu()
+        rebuildSessionMenu(menu, row: row)
+        return menu.numberOfItems > 0 ? menu : nil
+    }
+
+    /// 为图标栏的收藏/分组构造菜单（复用 rebuildBookmarkMenu，representedObject 传 SidebarItem）。
+    private func makeBookmarkMenu(for item: SidebarItem) -> NSMenu? {
+        let menu = NSMenu()
+        rebuildBookmarkMenu(menu, item: item)
+        return menu.numberOfItems > 0 ? menu : nil
     }
 
     // MARK: - Actions
@@ -534,9 +800,11 @@ final class SidebarViewController: NSViewController {
     }
 
     @objc private func renameSessionAction(_ sender: NSMenuItem) {
-        guard let environment, sessionsTable.clickedRow >= 0,
-              sessionsTable.clickedRow < environment.store.sessions.count else { return }
-        let session = environment.store.sessions[sessionsTable.clickedRow]
+        // 菜单项携带会话 ID：完整侧栏与图标栏共用同一 action。
+        guard let raw = sender.representedObject as? String,
+              let id = UUID(uuidString: raw),
+              let environment,
+              let session = environment.store.sessions.first(where: { $0.id == id }) else { return }
         prompt(title: "重命名聚合",
                message: "输入新的聚合名称。",
                defaultValue: session.name) { value in
@@ -550,9 +818,10 @@ final class SidebarViewController: NSViewController {
     }
 
     @objc private func deleteSessionAction(_ sender: NSMenuItem) {
-        guard let environment, sessionsTable.clickedRow >= 0,
-              sessionsTable.clickedRow < environment.store.sessions.count else { return }
-        let session = environment.store.sessions[sessionsTable.clickedRow]
+        guard let raw = sender.representedObject as? String,
+              let id = UUID(uuidString: raw),
+              let environment,
+              let session = environment.store.sessions.first(where: { $0.id == id }) else { return }
         confirm(title: "删除聚合",
                 message: "删除聚合“\(session.name)”？其中的 Pane 布局会一并移除，绑定的网页转为不可见并由内存管控回收。") {
             environment.store.deleteSession(id: session.id)
@@ -633,50 +902,66 @@ extension SidebarViewController: NSTableViewDataSource, NSTableViewDelegate, NSM
     }
 
     private func openSession(at row: Int) {
+        guard let environment, row >= 0, row < environment.store.sessions.count else { return }
+        openSession(id: environment.store.sessions[row].id)
+    }
+
+    /// 打开聚合：选中、允许自动加载、通知内容区，并同步两种侧栏的选中态。
+    private func openSession(id: UUID) {
         guard !suppressSelection,
               let environment,
-              row >= 0, row < environment.store.sessions.count else { return }
-        let session = environment.store.sessions[row]
-        environment.store.selectSession(id: session.id)
+              let index = environment.store.sessions.firstIndex(where: { $0.id == id }) else { return }
+        environment.store.selectSession(id: id)
         environment.autoLoadEnabled = true
-        onOpenSession?(session.id)
+        onOpenSession?(id)
+        // 图标栏点击时完整侧栏的表格可能仍停在上一项，这里补一次选中。
+        suppressSelection = true
+        sessionsTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        suppressSelection = false
+        updateRailSelection()
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === sessionMenu else {
-            rebuildBookmarkMenu(menu)
-            return
+        if menu === sessionMenu {
+            rebuildSessionMenu(menu, row: sessionsTable.clickedRow)
+        } else {
+            let row = outlineView.clickedRow
+            let item = row >= 0 ? outlineView.item(atRow: row) as? SidebarItem : nil
+            rebuildBookmarkMenu(menu, item: item)
         }
+    }
+
+    /// 完整侧栏表格与图标栏共用：按行重建聚合右键菜单。
+    private func rebuildSessionMenu(_ menu: NSMenu, row: Int?) {
         menu.removeAllItems()
-        guard let environment, sessionsTable.clickedRow >= 0,
-              sessionsTable.clickedRow < environment.store.sessions.count else { return }
-        let session = environment.store.sessions[sessionsTable.clickedRow]
-        menu.addItem(withTitle: "打开“\(session.name)”", action: #selector(openSessionFromMenu(_:)), keyEquivalent: "")
-        menu.items.last?.target = self
-        menu.items.last?.representedObject = session.id.uuidString
+        guard let environment, let row, row >= 0, row < environment.store.sessions.count else { return }
+        let session = environment.store.sessions[row]
+        let open = NSMenuItem(title: "打开“\(session.name)”",
+                              action: #selector(openSessionFromMenu(_:)),
+                              keyEquivalent: "")
+        open.target = self
+        open.representedObject = session.id.uuidString
+        menu.addItem(open)
         menu.addItem(.separator())
         let rename = NSMenuItem(title: "重命名…", action: #selector(renameSessionAction(_:)), keyEquivalent: "")
         rename.target = self
+        rename.representedObject = session.id.uuidString
         menu.addItem(rename)
         let delete = NSMenuItem(title: "删除…", action: #selector(deleteSessionAction(_:)), keyEquivalent: "")
         delete.target = self
+        delete.representedObject = session.id.uuidString
         menu.addItem(delete)
     }
 
     @objc private func openSessionFromMenu(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
-              let id = UUID(uuidString: raw),
-              let environment else { return }
-        environment.store.selectSession(id: id)
-        environment.autoLoadEnabled = true
-        onOpenSession?(id)
+              let id = UUID(uuidString: raw) else { return }
+        openSession(id: id)
         reloadAll()
     }
 
-    private func rebuildBookmarkMenu(_ menu: NSMenu) {
+    private func rebuildBookmarkMenu(_ menu: NSMenu, item: SidebarItem?) {
         menu.removeAllItems()
-        let row = outlineView.clickedRow
-        let item = row >= 0 ? outlineView.item(atRow: row) as? SidebarItem : nil
 
         if let item, let bookmark = item.bookmark {
             let open = NSMenuItem(title: "打开", action: #selector(openBookmarkAction(_:)), keyEquivalent: "")
@@ -833,19 +1118,45 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
         guard !suppressSelection, row >= 0,
               let item = outlineView.item(atRow: row) as? SidebarItem else { return }
         switch item.content {
-        case .bookmark(let bookmark):
-            selectedBookmarkID = bookmark.id
-            selectedGroupID = bookmark.groupID
-            environment?.autoLoadEnabled = true
-            onOpenBookmark?(bookmark.id)
+        case .bookmark:
+            activateBookmark(item)
         case .group(let group):
             selectedGroupID = group.id
             guard fromClick else { return }
-            if outlineView.isItemExpanded(item) {
-                outlineView.collapseItem(item)
-            } else {
-                outlineView.expandItem(item)
-            }
+            toggleGroupExpansion(for: item)
+        }
+    }
+
+    /// 收藏分支语义：设置选中态、允许自动加载、通知内容区打开。
+    /// 图标栏点击时完整侧栏虽隐藏，也同步其选中行，保证展开后一致。
+    private func activateBookmark(_ item: SidebarItem) {
+        guard let bookmark = item.bookmark else { return }
+        selectedBookmarkID = bookmark.id
+        selectedGroupID = bookmark.groupID
+        environment?.autoLoadEnabled = true
+        onOpenBookmark?(bookmark.id)
+        if outlineView.row(forItem: item) >= 0 {
+            suppressSelection = true
+            outlineView.selectRowIndexes(IndexSet(integer: outlineView.row(forItem: item)),
+                                         byExtendingSelection: false)
+            suppressSelection = false
+        }
+        updateRailSelection()
+    }
+
+    /// 分组展开/收起：以 store 状态为准，并同步 outlineView，保持两层数据一致。
+    private func toggleGroupExpansion(for item: SidebarItem) {
+        guard let group = item.group, let environment else { return }
+        let target = !(environment.store.library.group(id: group.id)?.isExpanded
+            ?? outlineView.isItemExpanded(item))
+        environment.store.setGroupExpanded(id: group.id, expanded: target)
+        if target {
+            outlineView.expandItem(item)
+        } else {
+            outlineView.collapseItem(item)
+        }
+        if displayMode == .rail {
+            rebuildRail()
         }
     }
 

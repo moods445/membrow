@@ -49,6 +49,12 @@ final class SiteInfoService {
         enqueue(bookmarkID)
     }
 
+    /// 只在本地还没有图标时补抓：用于刷新页面时补齐老收藏缺失的站点图标。
+    func refreshIconIfMissing(bookmarkID: UUID) {
+        guard SiteIconStore.image(for: bookmarkID, in: dataDirectory) == nil else { return }
+        enqueue(bookmarkID)
+    }
+
     /// 图标始终自动抓取（站点换图标后下次刷新即生效）；标题只在缺失时抓。
     func refreshAllMetadata() {
         for bookmark in store.library.bookmarks {

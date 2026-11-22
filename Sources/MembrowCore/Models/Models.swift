@@ -964,7 +964,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 maxInstancesWhenDegraded: Int = 4,
                 staticCaptureTimeout: TimeInterval = 15,
                 staticConcurrency: Int = 2,
-                globalTTLMinutes: Int = 24 * 60,
+                globalTTLMinutes: Int = 12 * 60,
                 memoryBudgetMB: Int = AppSettings.defaultMemoryBudgetMB,
                 forceMemoryAPIFailure: Bool = false,
                 microphoneEnabled: Bool = true,

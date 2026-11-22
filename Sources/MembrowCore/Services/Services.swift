@@ -182,6 +182,24 @@ public struct MemoryPlan: Equatable, Sendable {
     public var hasActions: Bool { !evict.isEmpty || !overage.isEmpty }
 }
 
+/// 内存豁免口径：判断一个页面是否算“正在使用”（激活），与淘汰策略解耦便于自测。
+public enum MemoryVisibility {
+    /// - attachedToWindow: WebView 是否仍挂在窗口层级里（被移出容器的旧页面为 false）。
+    /// - isWindowVisible: 所在窗口是否可见（最小化/关闭时为 false）。
+    /// - isHidden: 自身或祖先被隐藏（被放大的聚合里，其余 pane 属于这种情况）。
+    /// - isAggregationPane: 是否属于当前聚合面板；聚合内所有 pane 一律按前台激活处理。
+    ///
+    /// 遮挡状态不参与判断：应用退到后台、窗口被别的窗口盖住时，当前页仍是用户要回来的页面。
+    public static func isActive(attachedToWindow: Bool,
+                                isWindowVisible: Bool,
+                                isHidden: Bool,
+                                isAggregationPane: Bool) -> Bool {
+        guard attachedToWindow, isWindowVisible else { return false }
+        if isAggregationPane { return true }
+        return !isHidden
+    }
+}
+
 public enum MemoryGovernor {
     public static let dynamicBudgetBytes: Int64 = 1024 * 1024 * 1024
 

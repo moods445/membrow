@@ -69,8 +69,12 @@ final class ContentSlotView: NSView, ContentHosting {
             let captureChanged = !self.allowStaticCapture && allowStaticCapture
             self.autoActivate = autoActivate
             self.allowStaticCapture = self.allowStaticCapture || allowStaticCapture
+            // 再次打开同一收藏时重新给一次自动抓取机会：超过 TTL 的缓存要在这时刷新。
+            staticView?.resetAutoCapture()
             if activationChanged || captureChanged {
                 render(takeOver: activationChanged)
+            } else {
+                render()
             }
             return
         }

@@ -97,7 +97,7 @@ final class SettingsWindowController: NSWindowController {
         memoryBudgetField.placeholderString = "1024"
         staticTimeoutField.placeholderString = "15"
         staticConcurrencyField.placeholderString = "2"
-        globalTTLField.placeholderString = "1440"
+        globalTTLField.placeholderString = "720"
 
         faultInjectionCheckbox.target = self
         faultInjectionCheckbox.action = #selector(refreshDiagnostics)

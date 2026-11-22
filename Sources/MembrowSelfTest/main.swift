@@ -81,6 +81,7 @@ final class Harness {
         testTextTable()
         testExtraction()
         testMemory()
+        testInUseContentProtection()
         testSiteMatcher()
         await testConcurrencyLimiter()
         await testConcurrencyLimiterDynamicLimit()
@@ -91,6 +92,7 @@ final class Harness {
         testSiteMetadata()
         testCredentialScripts()
         testDiagnosticLog()
+        testSidebarLayout()
 
         if failures == 0 {
             print("PASS \(checks) checks")
@@ -610,6 +612,90 @@ final class Harness {
         check(sharedPlan.evict.isEmpty, "不因重复计数误杀实例")
     }
 
+    /// T066：正在使用的收藏（详情）与聚合面板内的页面禁止回收，只有被切走的旧页面按 LRU 回收。
+    private func testInUseContentProtection() {
+        let now = Date()
+
+        // 详情视图：当前收藏正在使用，后台两个旧页面按 LRU 回收。
+        let inUseBookmark = InstanceMemorySample(bookmarkID: UUID(), footprint: 900_000_000,
+                                                 isVisible: true, isPinned: false,
+                                                 lastVisibleAt: now.addingTimeInterval(-600))
+        let olderHidden = InstanceMemorySample(bookmarkID: UUID(), footprint: 100_000_000,
+                                               isVisible: false, isPinned: false,
+                                               lastVisibleAt: now.addingTimeInterval(-300))
+        let newerHidden = InstanceMemorySample(bookmarkID: UUID(), footprint: 100_000_000,
+                                               isVisible: false, isPinned: false,
+                                               lastVisibleAt: now.addingTimeInterval(-100))
+        let detailPlan = MemoryGovernor.plan(samples: [inUseBookmark, olderHidden, newerHidden],
+                                             mode: .precise(budgetBytes: MemoryGovernor.dynamicBudgetBytes))
+        checkEqual(detailPlan.evict, [olderHidden.bookmarkID], "只回收后台的旧页面")
+        check(!detailPlan.evict.contains(inUseBookmark.bookmarkID), "正在使用的收藏不被回收")
+        check(detailPlan.overage.isEmpty, "回收后台页面后不超预算")
+
+        // 聚合面板：当前 4 个 pane 全部激活，只有切走的旧聚合页面可回收。
+        let activePanes = (0..<4).map { index in
+            InstanceMemorySample(bookmarkID: UUID(), footprint: 250_000_000, isVisible: true,
+                                 isPinned: false, lastVisibleAt: now.addingTimeInterval(-Double(600 + index)))
+        }
+        let parkedSessionPage = InstanceMemorySample(bookmarkID: UUID(), footprint: 100_000_000,
+                                                     isVisible: false, isPinned: false,
+                                                     lastVisibleAt: now.addingTimeInterval(-50))
+        let sessionPlan = MemoryGovernor.plan(samples: activePanes + [parkedSessionPage],
+                                              mode: .precise(budgetBytes: MemoryGovernor.dynamicBudgetBytes))
+        checkEqual(sessionPlan.evict, [parkedSessionPage.bookmarkID], "只回收已切走的聚合页面")
+        check(activePanes.allSatisfy { !sessionPlan.evict.contains($0.bookmarkID) },
+              "当前聚合内所有 pane 不被回收")
+
+        // 当前聚合本身就超预算：宁可提示也不回收正在使用的 pane。
+        let overBudgetPanes = (0..<5).map { _ in
+            InstanceMemorySample(bookmarkID: UUID(), footprint: 300_000_000, isVisible: true,
+                                 isPinned: false, lastVisibleAt: now)
+        }
+        let panesOver = MemoryGovernor.plan(samples: overBudgetPanes,
+                                            mode: .precise(budgetBytes: MemoryGovernor.dynamicBudgetBytes))
+        check(panesOver.evict.isEmpty, "使用中的聚合超预算也不回收")
+        checkEqual(panesOver.overage.count, overBudgetPanes.count, "超限提示列出使用中的页面")
+
+        // 静态快照与动态实例同池：正在阅读的快照豁免，隐藏的旧快照按 LRU 回收。
+        let visibleSnapshot = InstanceMemorySample(bookmarkID: UUID(), footprint: 700_000_000,
+                                                   isVisible: true, isPinned: false,
+                                                   lastVisibleAt: now.addingTimeInterval(-500))
+        let hiddenSnapshot = InstanceMemorySample(bookmarkID: UUID(), footprint: 400_000_000,
+                                                  isVisible: false, isPinned: false,
+                                                  lastVisibleAt: now.addingTimeInterval(-400))
+        let recentHiddenSnapshot = InstanceMemorySample(bookmarkID: UUID(), footprint: 100_000_000,
+                                                        isVisible: false, isPinned: false,
+                                                        lastVisibleAt: now.addingTimeInterval(-10))
+        let snapshotPlan = MemoryGovernor.plan(samples: [visibleSnapshot, hiddenSnapshot, recentHiddenSnapshot],
+                                               mode: .precise(budgetBytes: MemoryGovernor.dynamicBudgetBytes))
+        checkEqual(snapshotPlan.evict, [hiddenSnapshot.bookmarkID], "按 LRU 先回收最旧的隐藏快照")
+        check(!snapshotPlan.evict.contains(visibleSnapshot.bookmarkID), "正在阅读的快照不被回收")
+
+        // 降级模式内存压力：使用中的页面同样豁免。
+        let critical = MemoryGovernor.plan(samples: activePanes + [parkedSessionPage],
+                                           mode: .degraded(instanceLimit: 4, pressure: .critical))
+        checkEqual(critical.evict, [parkedSessionPage.bookmarkID], "降级压力下只回收后台聚合页面")
+        check(activePanes.allSatisfy { !critical.evict.contains($0.bookmarkID) },
+              "降级压力下当前聚合 pane 不被回收")
+
+        // 豁免口径本身：动态实例与静态快照共用，覆盖“收藏/聚合正在使用”的判定。
+        check(MemoryVisibility.isActive(attachedToWindow: true, isWindowVisible: true,
+                                        isHidden: false, isAggregationPane: false),
+              "详情收藏在后台（窗口被遮挡）仍算激活")
+        check(MemoryVisibility.isActive(attachedToWindow: true, isWindowVisible: true,
+                                        isHidden: true, isAggregationPane: true),
+              "聚合内被放大遮盖的 pane 算激活")
+        check(!MemoryVisibility.isActive(attachedToWindow: false, isWindowVisible: true,
+                                         isHidden: false, isAggregationPane: true),
+              "已移出窗口的聚合 pane 可回收")
+        check(!MemoryVisibility.isActive(attachedToWindow: true, isWindowVisible: true,
+                                         isHidden: true, isAggregationPane: false),
+              "详情视图里被隐藏的页面可回收")
+        check(!MemoryVisibility.isActive(attachedToWindow: true, isWindowVisible: false,
+                                         isHidden: false, isAggregationPane: true),
+              "窗口最小化时不豁免")
+    }
+
     // MARK: Site matcher
 
     private func testSiteMatcher() {
@@ -781,6 +867,7 @@ final class Harness {
         settings.memoryBudgetMB = 100_000
         settings.normalize()
         checkEqual(settings.memoryBudgetMB, 8192, "内存预算上限 8192MB")
+        checkEqual(AppSettings().globalTTLMinutes, 720, "全局 TTL 默认 12 小时")
 
         // 旧版本 settings.json 缺少新字段时必须仍能读取，否则整份设置会退回默认值。
         let legacy = """
@@ -1017,6 +1104,59 @@ final class Harness {
             return nil
         }
         return object[key] as? String
+    }
+
+    // MARK: Sidebar layout
+
+    private func testSidebarLayout() {
+        // 循环语义：图标栏 ↔ 完整侧栏，连续两次 next 回到原值。
+        checkEqual(SidebarDisplayMode.rail.next, .expanded, "图标栏点击后切到完整侧栏")
+        checkEqual(SidebarDisplayMode.expanded.next, .rail, "完整侧栏点击后切回图标栏")
+        checkEqual(SidebarDisplayMode.rail.next.next, .rail, "连续两次切换回到原模式")
+        checkEqual(SidebarDisplayMode.expanded.next.next, .expanded, "完整侧栏连续两次切换回到原模式")
+        checkEqual(SidebarDisplayMode.rail.rawValue, "rail", "图标栏 rawValue")
+        checkEqual(SidebarDisplayMode.expanded.rawValue, "expanded", "完整侧栏 rawValue")
+
+        // 文案非空，且两种模式的显示名可区分。
+        for mode in SidebarDisplayMode.allCases {
+            check(!mode.displayName.isEmpty, "\(mode.rawValue) 显示名非空")
+            check(!mode.toggleLabel.isEmpty, "\(mode.rawValue) 切换提示非空")
+        }
+        check(SidebarDisplayMode.rail.displayName != SidebarDisplayMode.expanded.displayName,
+              "两种模式显示名不相等")
+
+        // 尺寸常量：图标栏必须窄于完整侧栏下限，比例落在 0...1。
+        check(SidebarLayout.railWidth < SidebarLayout.expandedMinimumWidth,
+              "图标栏宽度小于完整侧栏最小宽度")
+        check(SidebarLayout.railWidth > 0, "图标栏宽度大于 0")
+        check(SidebarLayout.railIconSize > 0, "图标尺寸大于 0")
+        check(SidebarLayout.expandedMaximumWidthRatio > 0
+              && SidebarLayout.expandedMaximumWidthRatio < 1,
+              "展开最大宽度比例在 0 与 1 之间")
+
+        // 内存状态栏文案：读不到占用与正常占用两条路径。
+        let unavailable = MemoryStatusFormatter.text(totalFootprint: nil, budgetMB: 1024,
+                                                      dynamicInstances: 2, snapshots: 1)
+        check(unavailable.hasPrefix("内存"), "内存状态以“内存”开头")
+        check(unavailable.contains("无法读取"), "读不到占用时显示无法读取")
+        check(unavailable.contains("实例 3"), "实例数合并动态与快照")
+        let measured = MemoryStatusFormatter.text(totalFootprint: 128 * 1024 * 1024, budgetMB: 1024,
+                                                   dynamicInstances: 0, snapshots: 0)
+        check(measured.contains("128"), "字节数格式化为可读单位")
+        check(measured.contains("实例 0"), "无实例时显示实例 0")
+        check(!MemoryStatusFormatter.formattedBytes(0).isEmpty, "0 字节也能格式化")
+
+        // Codable 往返：编码后再解码必须等于自身。
+        do {
+            for mode in SidebarDisplayMode.allCases {
+                let decoded = try JSONDecoder().decode(SidebarDisplayMode.self,
+                                                        from: JSONEncoder().encode(mode))
+                checkEqual(decoded, mode, "\(mode.rawValue) 编码后解码等于自身")
+            }
+        } catch {
+            failures += 1
+            print("FAIL 侧栏显示模式 Codable 往返失败：\(error)")
+        }
     }
 
     // MARK: Validation edges

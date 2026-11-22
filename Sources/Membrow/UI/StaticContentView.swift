@@ -126,15 +126,22 @@ final class StaticContentView: NSView {
 
     func load(bookmarkID: UUID, allowAutoCapture: Bool) {
         if self.bookmarkID != bookmarkID {
+            // 先按旧 ID 注销快照再切换：顺序反了会让旧条目残留在注册表里，
+            // 之后按旧收藏淘汰时，onEvict 会把这一页（新收藏）的快照误回收。
+            teardownSnapshot()
             self.bookmarkID = bookmarkID
             didAutoCapture = false
             textView.string = ""
             snapshotEvicted = false
             lastRenderKey = nil
-            teardownSnapshot()
         }
         self.allowAutoCapture = allowAutoCapture
         reload()
+    }
+
+    /// 允许下一次 reload 重新按 TTL 判定自动抓取：用户再次打开同一收藏时，过期缓存也要刷新。
+    func resetAutoCapture() {
+        didAutoCapture = false
     }
 
     func refresh() {
@@ -270,7 +277,7 @@ final class StaticContentView: NSView {
         let pageAppearance = bookmarkID
             .flatMap { environment?.store.bookmark(id: $0)?.effectivePageAppearance } ?? .system
         applySnapshotAppearance(pageAppearance, to: web)
-        // 纳入内存监控：可见时免淘汰，隐藏 pane 的快照按 LRU 回收。
+        // 纳入内存监控：激活时免淘汰（挂在窗口内且未被隐藏），隐藏 pane 的快照按 LRU 回收。
         if let bookmarkID {
             environment?.snapshots.register(
                 bookmarkID: bookmarkID,
@@ -283,11 +290,12 @@ final class StaticContentView: NSView {
     }
 
     private var isSnapshotVisible: Bool {
-        guard let window, window.isVisible else { return false }
-        // 聚合面板内的快照不看遮挡与放大遮盖：面板还在前台，快照就随 pane 一起豁免。
-        if isAggregationPane { return true }
-        guard !isHiddenOrHasHiddenAncestor else { return false }
-        return window.occlusionState.contains(.visible)
+        // 与动态实例同一口径：挂在窗口内且未被隐藏即激活；聚合 pane 忽略放大遮盖，遮挡不影响。
+        let window = self.window
+        return MemoryVisibility.isActive(attachedToWindow: window != nil,
+                                         isWindowVisible: window?.isVisible == true,
+                                         isHidden: isHiddenOrHasHiddenAncestor,
+                                         isAggregationPane: isAggregationPane)
     }
 
     /// 内存预算回收快照：销毁 WebView 并回退到已缓存的 Markdown。
@@ -369,6 +377,8 @@ final class StaticContentView: NSView {
 
     private func forceRefresh() {
         guard let bookmarkID else { return }
+        // 静态页刷新事件相同：缺图标就顺带补抓。
+        environment?.siteInfo.refreshIconIfMissing(bookmarkID: bookmarkID)
         snapshotEvicted = false
         didAutoCapture = true
         environment?.staticManager.forceRefresh(bookmarkID: bookmarkID)

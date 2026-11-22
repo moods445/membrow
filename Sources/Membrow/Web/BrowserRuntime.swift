@@ -315,9 +315,13 @@ final class BrowserRuntime {
             // 不看遮挡状态——应用退到后台或被别的窗口盖住时，这一页仍是用户要回来的页面，
             // 不能因为一分钟没看到就把它淘汰掉。被移出容器/隐藏 pane 的 WebView 不在此列。
             // 例外：当前聚合面板里的 pane 全部算前台激活，放大时被盖住的 pane 也豁免回收。
-            let inAggregationPane = instance.host?.isAggregationPane == true
-            let visible = instance.webView.window.map { $0.isVisible } == true
-                && (inAggregationPane || !instance.webView.isHiddenOrHasHiddenAncestor)
+            let window = instance.webView.window
+            let visible = MemoryVisibility.isActive(
+                attachedToWindow: window != nil,
+                isWindowVisible: window?.isVisible == true,
+                isHidden: instance.webView.isHiddenOrHasHiddenAncestor,
+                isAggregationPane: instance.host?.isAggregationPane == true
+            )
             instance.isVisible = visible
             if visible { instance.lastVisibleAt = now }
             let pid = MemoryProbe.webProcessIdentifier(of: instance.webView)

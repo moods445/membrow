@@ -12,14 +12,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     let environment: AppEnvironment
     private let splitViewController = NSSplitViewController()
+    private let rootController = MainWindowRootController()
     private let sidebar: SidebarViewController
     private let content: MainContentViewController
+    private let statusBar = StatusBarView()
     private var sidebarItem: NSSplitViewItem!
     private let layoutControl = NSSegmentedControl()
     private var placement: SidebarPlacement = .leading
     private var preferredPlacement: SidebarPlacement = .leading
+    /// 侧栏显示模式：仅图标栏 / 完整栏，由状态栏左下角按钮循环切换。
+    private var sidebarMode: SidebarDisplayMode = .expanded
     private var isHandlingChange = false
     private var occlusionObserver: NSObjectProtocol?
+    private var splitViewObserver: NSObjectProtocol?
     /// 站点信息逐个抓完会连续触发 onChange，合并成一次刷新。
     private var siteInfoRefreshWork: DispatchWorkItem?
 
@@ -71,14 +76,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let occlusionObserver {
             NotificationCenter.default.removeObserver(occlusionObserver)
         }
+        if let splitViewObserver {
+            NotificationCenter.default.removeObserver(splitViewObserver)
+        }
     }
 
     private func buildSplitView() {
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 180
-        // 宽度可自由拖动：上限交给内容区 minimumThickness 约束，避免把主体挤没。
-        sidebarItem.maximumThickness = 10_000
-        sidebarItem.canCollapse = true
+        // 完整模式最小只能拖到“仅图标栏”宽度，是否真的切到图标栏由 sidebarDidResize 判定。
+        sidebarItem.minimumThickness = SidebarLayout.railWidth
+        sidebarItem.maximumThickness = SidebarLayout.expandedDefaultWidth
+        // 折叠只由“仅显示内容”程序控制，不允许用户把侧栏一路拖到 0。
+        sidebarItem.canCollapse = false
         sidebarItem.holdingPriority = .defaultHigh
         self.sidebarItem = sidebarItem
 
@@ -89,18 +98,63 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         splitViewController.addSplitViewItem(contentItem)
         splitViewController.splitView.autosaveName = "MembrowSplitView"
 
+        // 拖宽小于完整栏下限即视为“收起为图标栏”，并把展开宽度记下来供下次恢复。
+        splitViewObserver = NotificationCenter.default.addObserver(
+            forName: NSSplitView.didResizeSubviewsNotification,
+            object: splitViewController.splitView,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.sidebarDidResize()
+            }
+        }
+
         // 先按上次布局排好顺序，再挂到窗口：这样 split view 自动保存的宽度按同一顺序套用。
         restorePlacement()
+        restoreSidebarMode()
         installLayoutControl()
+        installStatusBar()
 
-        window?.contentViewController = splitViewController
+        // 状态栏通栏在窗口底部：用容器承载 split view + 状态栏，
+        // 直接把 splitViewController 设为 contentViewController 会让 split view 占满整个内容视图。
+        rootController.view.addSubview(splitViewController.view)
+        splitViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        rootController.addChild(splitViewController)
+        window?.contentViewController = rootController
+        layoutSplitAndStatusBar()
         updateLayoutControl()
+        updateStatusBar()
+    }
+
+    private func layoutSplitAndStatusBar() {
+        let rootView = rootController.view
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            splitViewController.view.topAnchor.constraint(equalTo: rootView.topAnchor),
+            splitViewController.view.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            splitViewController.view.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            splitViewController.view.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            statusBar.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            statusBar.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            statusBar.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+            statusBar.heightAnchor.constraint(equalToConstant: 26),
+        ])
+    }
+
+    private func installStatusBar() {
+        rootController.view.addSubview(statusBar)
+        statusBar.onToggle = { [weak self] in
+            self?.cycleSidebarMode()
+        }
     }
 
     // MARK: - 侧栏布局
 
     private static let placementKey = "sidebarPlacement"
     private static let preferredPlacementKey = "sidebarPreferredPlacement"
+    private static let sidebarModeKey = "sidebarDisplayMode"
+    private static let sidebarExpandedWidthKey = "sidebarExpandedWidth"
 
     private func restorePlacement() {
         let defaults = UserDefaults.standard
@@ -109,6 +163,80 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             .flatMap(SidebarPlacement.init(rawValue:)) ?? .leading
         preferredPlacement = preferred == .hidden ? .leading : preferred
         apply(placement: saved)
+    }
+
+    /// 恢复上次的侧栏显示模式；默认完整栏，避免老用户升级后侧栏突然只剩图标。
+    private func restoreSidebarMode() {
+        let raw = UserDefaults.standard.string(forKey: Self.sidebarModeKey)
+            ?? SidebarDisplayMode.expanded.rawValue
+        applySidebarMode(SidebarDisplayMode(rawValue: raw) ?? .expanded)
+    }
+
+    private func applySidebarMode(_ mode: SidebarDisplayMode, forcePosition: Bool = false) {
+        sidebarMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.sidebarModeKey)
+        sidebar.applyDisplayMode(mode)
+        layoutSidebarThickness(forcePosition: forcePosition)
+        updateStatusBar()
+    }
+
+    /// 状态栏左下角按钮：在“仅图标栏”和“完整侧栏”之间循环。
+    @objc func cycleSidebarMode() {
+        // 侧栏处于“仅显示内容”时先恢复位置：rail 模式不改折叠态，否则第一次点击看起来毫无反应。
+        if placement == .hidden {
+            apply(placement: preferredPlacement)
+            updateLayoutControl()
+        }
+        applySidebarMode(sidebarMode.next, forcePosition: true)
+    }
+
+    private func layoutSidebarThickness(forcePosition: Bool = false) {
+        switch sidebarMode {
+        case .rail:
+            sidebarItem.minimumThickness = SidebarLayout.railWidth
+            sidebarItem.maximumThickness = SidebarLayout.railWidth
+        case .expanded:
+            let maxWidth = max(SidebarLayout.expandedMinimumWidth,
+                               (window?.frame.width ?? 1200) * SidebarLayout.expandedMaximumWidthRatio)
+            sidebarItem.minimumThickness = SidebarLayout.railWidth
+            sidebarItem.maximumThickness = maxWidth
+            // 折叠只由 placement 控制：这里若解除折叠，启动时恢复的“仅显示内容”会被模式恢复覆盖。
+            guard forcePosition, splitViewController.splitView.frame.width > 0 else { return }
+            let saved = UserDefaults.standard.double(forKey: Self.sidebarExpandedWidthKey)
+            let width = saved > 0 ? CGFloat(saved) : SidebarLayout.expandedDefaultWidth
+            let clamped = min(max(width, SidebarLayout.expandedMinimumWidth), maxWidth)
+            let position = placement == .trailing
+                ? splitViewController.splitView.frame.width - clamped
+                : clamped
+            splitViewController.splitView.setPosition(max(position, SidebarLayout.railWidth), ofDividerAt: 0)
+        }
+    }
+
+    /// 拖过完整栏下限就自动收成图标栏；否则记住当前展开宽度。
+    private func sidebarDidResize() {
+        guard sidebarMode == .expanded, placement != .hidden else { return }
+        let splitView = splitViewController.splitView
+        guard splitView.frame.width > 0 else { return }
+        // 缩放窗口时 AppKit 会把侧栏压到 30% 上限，这不是用户拖出的宽度，不该写回记忆值。
+        guard window?.inLiveResize != true else { return }
+        let width = sidebar.view.frame.width
+        // 分隔条厚度/坐标取整可能让恢复宽度略低于下限，留 1pt 容差避免“展开后立刻弹回收起”。
+        if width < SidebarLayout.expandedMinimumWidth - 1 {
+            applySidebarMode(.rail)
+        } else {
+            UserDefaults.standard.set(width, forKey: Self.sidebarExpandedWidthKey)
+        }
+    }
+
+    private func updateStatusBar() {
+        let settings = environment.store.settings
+        let text = MemoryStatusFormatter.text(
+            totalFootprint: environment.memoryMonitor.lastPlan?.totalFootprint,
+            budgetMB: settings.memoryBudgetMB,
+            dynamicInstances: environment.runtime.instanceCount,
+            snapshots: environment.snapshots.count
+        )
+        statusBar.configure(mode: sidebarMode, memoryText: text)
     }
 
     private func installLayoutControl() {
@@ -173,7 +301,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             moveSidebar(to: splitViewController.splitViewItems.count - 1)
             sidebarItem.isCollapsed = false
         }
+        // 先提交新位置：layoutSidebarThickness 要用它决定分隔条从哪一侧算宽度，
+        // 否则左右切换时会按旧位置摆错宽度（内容区被压到最小宽度）。
         placement = target
+        if target != .hidden {
+            // 从“仅显示内容”恢复时 split view 可能把侧栏宽度压到下限以下，按当前模式重新摆好。
+            layoutSidebarThickness(forcePosition: sidebarMode == .expanded)
+        }
         UserDefaults.standard.set(target.rawValue, forKey: Self.placementKey)
         UserDefaults.standard.set(preferredPlacement.rawValue, forKey: Self.preferredPlacementKey)
     }
@@ -255,6 +389,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content.refreshStatusOnly()
         content.updateMemoryBanner()
         sidebar.reloadStatuses()
+        updateStatusBar()
     }
 
     // MARK: - Startup policy
@@ -342,6 +477,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func reloadCurrent() {
         if let bookmarkID = content.currentBookmarkID,
            let bookmark = environment.store.bookmark(id: bookmarkID) {
+            // 刷新页面时顺手补齐缺失图标（老收藏升级后也能自动补上）。
+            environment.siteInfo.refreshIconIfMissing(bookmarkID: bookmarkID)
             if bookmark.kind == .staticPage {
                 environment.staticManager.forceRefresh(bookmarkID: bookmarkID)
                 content.refreshAll()
@@ -356,8 +493,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let session = content.currentSession {
             for pane in session.allPanes {
                 guard let bookmarkID = pane.bookmarkID,
-                      let bookmark = environment.store.bookmark(id: bookmarkID),
-                      bookmark.kind == .dynamic,
+                      let bookmark = environment.store.bookmark(id: bookmarkID) else { continue }
+                environment.siteInfo.refreshIconIfMissing(bookmarkID: bookmarkID)
+                guard bookmark.kind == .dynamic,
                       environment.runtime.hasInstance(bookmarkID) else { continue }
                 environment.runtime.reload(bookmarkID: bookmarkID)
             }
@@ -419,7 +557,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    func windowDidResize(_ notification: Notification) {
+        // 窗口变宽时放开完整栏的最大宽度（30%），变窄时收紧。
+        layoutSidebarThickness()
+    }
+
     func windowWillClose(_ notification: Notification) {
         environment.memoryMonitor.stop()
+    }
+}
+
+/// 窗口根容器：竖向承载 split view 与底部状态栏。
+@MainActor
+private final class MainWindowRootController: NSViewController {
+    override func loadView() {
+        let view = NSView()
+        view.wantsLayer = false
+        self.view = view
     }
 }
