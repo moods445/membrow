@@ -27,7 +27,6 @@ final class AppEnvironment {
         DiagnosticLog.shared.info("应用启动",
                                   category: "app",
                                   fields: ["dataDirectory": directory.path,
-                                           "developerMode": store.settings.developerMode ? "on" : "off",
                                            "system": ProcessInfo.processInfo.operatingSystemVersionString])
         for warning in store.loadWarnings {
             DiagnosticLog.shared.error("数据读取告警", category: "app", fields: ["detail": warning])

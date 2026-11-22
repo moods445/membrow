@@ -378,6 +378,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content.refreshStatusOnly()
     }
 
+    func toggleDeveloperTools() {
+        guard let bookmarkID = content.currentBookmarkID else { return }
+        environment.runtime.toggleWebInspector(bookmarkID: bookmarkID)
+    }
+
     /// 保存登录信息必须由用户确认；已有 sheet 时放弃本次提示（不静默写入）。
     private func presentSaveCredential(_ candidate: BrowserRuntime.CredentialCandidate) {
         guard let window, window.attachedSheet == nil else { return }

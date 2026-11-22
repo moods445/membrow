@@ -90,6 +90,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.goForward()
     }
 
+    /// F12 / 菜单：打开当前网页的开发者工具（Web Inspector），再按一次关闭。
+    @objc private func openDeveloperTools(_ sender: Any?) {
+        windowController?.toggleDeveloperTools()
+    }
+
     private func buildMainMenu() {
         let mainMenu = NSMenu()
 
@@ -152,6 +157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let forwardItem = NSMenuItem(title: "前进", action: #selector(goForward(_:)), keyEquivalent: "]")
         forwardItem.target = self
         viewMenu.addItem(forwardItem)
+        viewMenu.addItem(.separator())
+        let developerItem = NSMenuItem(title: "打开开发者工具",
+                                       action: #selector(openDeveloperTools(_:)),
+                                       keyEquivalent: String(UnicodeScalar(NSF12FunctionKey)!))
+        developerItem.target = self
+        viewMenu.addItem(developerItem)
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 

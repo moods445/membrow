@@ -36,7 +36,6 @@ enum MemoryDiagnostics {
             ["proc_pid_rusage", MemoryProbe.rusageAvailable ? "可用" : "不可用"],
             ["故障注入", environment.store.settings.forceMemoryAPIFailure ? "开启" : "关闭"],
             ["麦克风", environment.store.settings.microphoneEnabled ? "允许" : "禁止"],
-            ["开发者模式", environment.store.settings.developerMode ? "开启" : "关闭"],
             ["诊断日志", environment.dataDirectory.appendingPathComponent("logs/info.jsonl").path],
             ["开机自启", LaunchAtLogin.statusDescription],
             ["强制深色样式表", ForcedDarkStyleSheet.isAvailable ? "可用" : "不可用（降级为不反色）"],

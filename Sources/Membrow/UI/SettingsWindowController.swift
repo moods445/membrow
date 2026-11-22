@@ -21,8 +21,6 @@ final class SettingsWindowController: NSWindowController {
                                               target: nil, action: nil)
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "开机自启（登录时自动打开 Membrow）",
                                                  target: nil, action: nil)
-    private let developerModeCheckbox = NSButton(checkboxWithTitle: "开发者模式（网页右键可“检查元素”）",
-                                                  target: nil, action: nil)
     private let openLogsButton = NSButton(title: "打开日志", target: nil, action: nil)
     private let errorLabel = makeLabel("", font: NSFont.systemFont(ofSize: 11), color: .systemRed)
     private let modeLabel = makeLabel("", font: NSFont.systemFont(ofSize: 11), color: .secondaryLabelColor)
@@ -108,9 +106,6 @@ final class SettingsWindowController: NSWindowController {
         openLogsButton.action = #selector(openLogs)
         openLogsButton.bezelStyle = .rounded
         openLogsButton.controlSize = .small
-        let developerRow = NSStackView(views: [developerModeCheckbox, openLogsButton])
-        developerRow.orientation = .horizontal
-        developerRow.spacing = 8
 
         let proxyHostRow = NSStackView(views: [proxyHostField, makeLabel(":", font: .systemFont(ofSize: 12)), proxyPortField])
         proxyHostRow.orientation = .horizontal
@@ -180,7 +175,7 @@ final class SettingsWindowController: NSWindowController {
             [makeGridLabel("媒体"), microphoneCheckbox],
             [makeGridLabel("已保存密码"), credentialRow],
             [makeGridLabel(""), faultInjectionCheckbox],
-            [makeGridLabel("开发者"), developerRow],
+            [makeGridLabel("日志"), openLogsButton],
             [makeGridLabel("内存模式"), modeLabel],
             [makeGridLabel("诊断"), diagnosticsScroll],
             [makeGridLabel(""), refreshButton],
@@ -262,7 +257,6 @@ final class SettingsWindowController: NSWindowController {
         microphoneCheckbox.state = settings.microphoneEnabled ? .on : .off
         // 登录项以系统实际状态为准：用户在“系统设置”里手动关掉后，这里也跟着变。
         launchAtLoginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
-        developerModeCheckbox.state = settings.developerMode ? .on : .off
         modeLabel.stringValue = environment.memoryMonitor.modeDisplayName
         reloadCredentials()
     }
@@ -322,7 +316,6 @@ final class SettingsWindowController: NSWindowController {
             ["静态超时", "\(Int(settings.staticCaptureTimeout)) 秒"],
             ["全局 TTL", "\(settings.globalTTLMinutes) 分钟"],
             ["麦克风", settings.microphoneEnabled ? "允许（系统授权为准）" : "禁止"],
-            ["开发者模式", settings.developerMode ? "开启（可检查元素）" : "关闭"],
             ["诊断日志", "info.jsonl / problems.jsonl（各上限 20MB）"],
             ["开机自启", LaunchAtLogin.statusDescription],
         ]
@@ -393,7 +386,6 @@ final class SettingsWindowController: NSWindowController {
         settings.globalTTLMinutes = ttl
         settings.forceMemoryAPIFailure = faultInjectionCheckbox.state == .on
         settings.microphoneEnabled = microphoneCheckbox.state == .on
-        settings.developerMode = developerModeCheckbox.state == .on
 
         // 全部校验通过后再动系统登录项，避免输入有误时已经改掉开机自启。
         let desiredLaunchAtLogin = launchAtLoginCheckbox.state == .on
@@ -405,8 +397,6 @@ final class SettingsWindowController: NSWindowController {
         do {
             try environment.store.updateSettings(settings)
             environment.staticManager.onChange?()
-            // 已打开的网页实例立即获得/失去“检查元素”能力，不用重开。
-            environment.runtime.applyDeveloperMode()
             // store 会把越界值静默钳制（如内存 100 → 128），回填一次让界面与实际配置一致。
             populate()
             refreshDiagnostics()

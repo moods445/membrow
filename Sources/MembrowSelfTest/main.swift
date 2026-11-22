@@ -794,7 +794,6 @@ final class Harness {
             checkEqual(decoded.maxInstancesWhenDegraded, 4, "缺失字段回退默认值")
             checkEqual(decoded.microphoneEnabled, true, "旧配置缺字段时默认允许麦克风")
             checkEqual(decoded.launchAtLogin, false, "旧配置缺字段时默认不开机自启")
-            checkEqual(decoded.developerMode, false, "旧配置缺字段时默认关闭开发者模式")
         } catch {
             failures += 1
             print("FAIL 旧版 settings.json 解码失败：\(error)")
@@ -809,6 +808,18 @@ final class Harness {
         } catch {
             failures += 1
             print("FAIL 麦克风设置解码失败：\(error)")
+        }
+
+        // 上一版保存过 developerMode 的 settings.json 仍能读取（新版本忽略该键）。
+        let obsolete = """
+        {"developerMode":true,"launchAtLogin":true}
+        """
+        do {
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(obsolete.utf8))
+            checkEqual(decoded.launchAtLogin, true, "旧版 developerMode 键不影响设置读取")
+        } catch {
+            failures += 1
+            print("FAIL 含旧 developerMode 键的设置解码失败：\(error)")
         }
 
         let autoStart = """

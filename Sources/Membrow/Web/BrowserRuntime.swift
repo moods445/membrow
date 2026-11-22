@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MembrowCore
+import ObjectiveC
 import WebKit
 
 @MainActor
@@ -127,6 +128,7 @@ final class BrowserRuntime {
 
     private func makeInstance(for bookmark: Bookmark) -> WebInstance {
         let configuration = WKWebViewConfiguration()
+        enableDeveloperExtras(on: configuration.preferences)
         configuration.websiteDataStore = sharedWebData.dataStore(for: bookmark, settings: store.settings)
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -143,8 +145,10 @@ final class BrowserRuntime {
                          injectionTime: .atDocumentEnd,
                          forMainFrameOnly: true))
 
+        // 开发者工具始终可用：F12 与右键“检查元素”都依赖 WebKit 的检查能力。
+        UserDefaults.standard.set(true, forKey: "WebKitDeveloperExtras")
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.isInspectable = store.settings.developerMode
+        webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = handler
@@ -422,12 +426,43 @@ final class BrowserRuntime {
 
     // MARK: - Diagnostics
 
-    /// 开发者模式只影响能否打开 Web Inspector；诊断日志始终记录。
-    func applyDeveloperMode() {
-        let enabled = store.settings.developerMode
-        for instance in instances.values {
-            instance.webView.isInspectable = enabled
+    /// F12 / 菜单打开当前网页的开发者工具，再按一次关闭。
+    ///
+    /// ponytail: WebKit 没有公开 API 主动弹出 Web Inspector，这里用私有 SPI（本机 macOS 14 可用）。
+    /// 系统升级后 SPI 改名时只记日志，不影响浏览。
+    func toggleWebInspector(bookmarkID: UUID) {
+        guard let instance = instances[bookmarkID] else { return }
+        let webView = instance.webView
+        guard let inspector = webView.perform(NSSelectorFromString("_inspector"))?.takeUnretainedValue() as? NSObject,
+              inspector.responds(to: NSSelectorFromString("connect")),
+              inspector.responds(to: NSSelectorFromString("show")),
+              inspector.responds(to: NSSelectorFromString("close")) else {
+            DiagnosticLog.shared.error("开发者工具不可用：WebKit 检视器接口缺失", category: "app")
+            return
         }
+        let visible = (inspector.value(forKey: "isVisible") as? Bool) ?? false
+        if visible {
+            inspector.perform(NSSelectorFromString("close"))
+        } else {
+            // 检视器前端必须先 connect，否则 show 是空操作。
+            if !((inspector.value(forKey: "isConnected") as? Bool) ?? false) {
+                inspector.perform(NSSelectorFromString("connect"))
+            }
+            inspector.perform(NSSelectorFromString("show"))
+        }
+        DiagnosticLog.shared.info(visible ? "关闭开发者工具" : "打开开发者工具",
+                                  category: "app",
+                                  fields: ["bookmark": store.bookmark(id: bookmarkID)?.trimmedName ?? ""])
+    }
+
+    /// 检视器前端依赖 WKPreferences 的私有开发者开关：不开时 `_inspector` 拿不到连接，show 无效。
+    /// ponytail: 私有 SPI，系统升级后可能失效；失败时不改变浏览行为，只影响 F12。
+    private func enableDeveloperExtras(on preferences: WKPreferences) {
+        let selector = NSSelectorFromString("_setDeveloperExtrasEnabled:")
+        guard preferences.responds(to: selector),
+              let method = class_getInstanceMethod(type(of: preferences), selector) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(method_getImplementation(method), to: Setter.self)(preferences, selector, true)
     }
 
     private func log(_ level: DiagnosticLog.Level,
