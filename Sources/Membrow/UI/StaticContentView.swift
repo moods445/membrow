@@ -144,6 +144,14 @@ final class StaticContentView: NSView {
         didAutoCapture = false
     }
 
+    /// 静态视图被原网页替换时注销快照：WebView 已脱离窗口但视图仍被持有，
+    /// 残留的隐藏样本会和前台动态实例共用收藏 ID，按 ID 回收时会误杀实例。
+    func suspendSnapshot() {
+        guard snapshotWebView != nil else { return }
+        teardownSnapshot()
+        lastRenderKey = nil
+    }
+
     func refresh() {
         reload()
     }

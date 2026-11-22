@@ -678,6 +678,29 @@ final class Harness {
         check(activePanes.allSatisfy { !critical.evict.contains($0.bookmarkID) },
               "降级压力下当前聚合 pane 不被回收")
 
+        // 同一收藏同时有前台动态实例（详情或聚合 pane）与残留隐藏快照：
+        // 回收按收藏 ID 联动执行，隐藏样本不能把正在显示的实例一起杀掉。
+        let sharedID = UUID()
+        let foregroundInstance = InstanceMemorySample(bookmarkID: sharedID, footprint: 600_000_000,
+                                                      isVisible: true, isPinned: false,
+                                                      lastVisibleAt: now.addingTimeInterval(-20))
+        let staleSnapshot = InstanceMemorySample(bookmarkID: sharedID, footprint: 100_000_000,
+                                                  isVisible: false, isPinned: false,
+                                                  lastVisibleAt: now.addingTimeInterval(-500))
+        let parkedBookmark = InstanceMemorySample(bookmarkID: UUID(), footprint: 300_000_000,
+                                                  isVisible: false, isPinned: false,
+                                                  lastVisibleAt: now.addingTimeInterval(-300))
+        let duplicateSamples = [foregroundInstance, staleSnapshot, parkedBookmark]
+        let duplicatePlan = MemoryGovernor.plan(samples: duplicateSamples,
+                                                mode: .precise(budgetBytes: 500_000_000))
+        check(!duplicatePlan.evict.contains(sharedID), "前台收藏不被同 ID 的残留快照连带回收")
+        checkEqual(duplicatePlan.evict, [parkedBookmark.bookmarkID], "只回收真正后台的收藏")
+        check(duplicatePlan.overage.contains(sharedID), "仍超预算时前台收藏进入超限提示而非回收")
+        let duplicateCritical = MemoryGovernor.plan(samples: duplicateSamples,
+                                                    mode: .degraded(instanceLimit: 4, pressure: .critical))
+        check(!duplicateCritical.evict.contains(sharedID), "降级压力下前台收藏同样豁免")
+        checkEqual(duplicateCritical.evict, [parkedBookmark.bookmarkID], "降级压力也只回收后台收藏")
+
         // 豁免口径本身：动态实例与静态快照共用，覆盖“收藏/聚合正在使用”的判定。
         check(MemoryVisibility.isActive(attachedToWindow: true, isWindowVisible: true,
                                         isHidden: false, isAggregationPane: false),

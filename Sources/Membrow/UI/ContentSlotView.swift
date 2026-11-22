@@ -157,6 +157,8 @@ final class ContentSlotView: NSView, ContentHosting {
     }
 
     private func renderWeb(_ bookmark: Bookmark, environment: AppEnvironment, takeOver: Bool) {
+        // 原网页模式：静态视图被动态 WebView 替换，先注销它的快照，避免残留样本参与回收。
+        staticView?.suspendSnapshot()
         if let instance = environment.runtime.instance(for: bookmark.id) {
             if instance.host === self {
                 installContent(instance.webView)

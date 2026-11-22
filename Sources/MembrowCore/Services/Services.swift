@@ -232,13 +232,20 @@ public enum MemoryGovernor {
         }
     }
 
+    /// 同一收藏可能同时登记动态实例与静态快照（静态页切到原网页模式时旧快照仍被持有）。
+    /// 任一为前台/固定就不能淘汰：回收按收藏 ID 联动执行，否则隐藏快照会把正在显示的实例一起杀掉。
+    private static func evictableSamples(in samples: [InstanceMemorySample]) -> [InstanceMemorySample] {
+        let protected = Set(samples.filter { !$0.isEvictable }.map(\.bookmarkID))
+        return samples.filter { $0.isEvictable && !protected.contains($0.bookmarkID) }
+    }
+
     private static func precisePlan(samples: [InstanceMemorySample], budget: Int64, mode: MemoryMode) -> MemoryPlan {
         var total = samples.reduce(Int64(0)) { $0 + ($1.footprint ?? 0) }
         var evict: [UUID] = []
         var remaining = samples
 
         if total > budget {
-            let candidates = samples.filter(\.isEvictable).sorted { $0.lastVisibleAt < $1.lastVisibleAt }
+            let candidates = evictableSamples(in: samples).sorted { $0.lastVisibleAt < $1.lastVisibleAt }
             for candidate in candidates {
                 if total <= budget { break }
                 evict.append(candidate.bookmarkID)
@@ -269,7 +276,7 @@ public enum MemoryGovernor {
         var reason: MemoryPlan.Reason = .none
         var remaining = samples
 
-        let evictable = samples.filter(\.isEvictable).sorted { $0.lastVisibleAt < $1.lastVisibleAt }
+        let evictable = evictableSamples(in: samples).sorted { $0.lastVisibleAt < $1.lastVisibleAt }
 
         if pressure == .critical {
             evict = evictable.map(\.bookmarkID)
